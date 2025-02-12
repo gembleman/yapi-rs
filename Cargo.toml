@@ -4,6 +4,7 @@ version = "0.0.5"
 edition = "2021"
 description = "A Rust port of [Yet Another Process Injector] that reduce differences between x64, wow64 and x86 processes."
 authors = ["Kerilk"]
+repository = "https://github.com/gembleman/yapi-rs"
 license = "MIT OR Apache-2.0"
 keywords = ["windows", "injector", "injection", "dll-injection"]
 categories = ["api-bindings", "os::windows-apis"]
