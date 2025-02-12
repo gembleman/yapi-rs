@@ -47,6 +47,7 @@ where
         self.yapi_arch.func_arch = func_arch;
     }
 
+    /// is_64bit_func is only use when target_process is 32bit and function is 64bit
     pub fn new(
         target_process: HANDLE,
         module_name: &str,

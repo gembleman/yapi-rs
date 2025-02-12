@@ -155,7 +155,7 @@ fn test_message_box() -> Result<()> {
 #[test]
 fn test_loadlibrary() -> Result<()> {
     unsafe {
-        let (process, pid) = find_explorer_process("explorer.exe")?;
+        let (process, pid) = find_explorer_process("x86-for-test.exe")?; // build in 32bit
 
         let mut load_library =
             YAPICall::<HMODULE>::new(process, "kernel32.dll", "LoadLibraryW", false)?

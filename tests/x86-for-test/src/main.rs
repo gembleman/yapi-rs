@@ -7,7 +7,10 @@ use windows::{
 fn main() -> Result<()> {
     // 프로세스 ID를 표시할 문자열 준비
     let pid = unsafe { GetCurrentProcessId() };
+    #[cfg(target_arch = "x86")]
     let title = format!("32-bit Test Process (PID: {})", pid);
+    #[cfg(target_arch = "x86_64")]
+    let title = format!("64-bit Test Process (PID: {})", pid);
 
     unsafe {
         // 윈도우 클래스 등록
