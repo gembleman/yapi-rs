@@ -72,7 +72,7 @@ where
             }
         };
 
-        // 함수 아키텍처 결정 - WOW64 함수는 항상 32비트
+        // 함수 아키텍처 결정 - WOW64 함수는 항상 32비트 // is_64bit_func이 true이면 64비트 함수라 간주
         let func_arch = if is_64bit_func { X64 } else { target_proc_arch };
 
         let yapi_arch = YapiArch::new(host_arch, target_proc_arch, func_arch);

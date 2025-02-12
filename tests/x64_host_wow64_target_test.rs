@@ -129,7 +129,7 @@ fn test_process_writer_wow64() -> Result<()> {
 
         println!("Memory allocated at 0x{:X}", address);
 
-        std::thread::sleep(Duration::from_secs(10000));
+        // std::thread::sleep(Duration::from_secs(10000));
 
         CloseHandle(process_handle)?;
         Ok(())

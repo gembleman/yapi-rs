@@ -139,6 +139,7 @@ impl ShellCodeBuilder {
     pub fn build(&self) -> Vec<u8> {
         #[cfg(debug_assertions)]
         self.debug_validate();
+
         self.shell_code.clone()
     }
 
@@ -148,7 +149,7 @@ impl ShellCodeBuilder {
             || (self.yapi_arch.host_arch == X64 && self.shell_code.len() < K_TMPL_X64.len())
             || (self.yapi_arch.host_arch == X86 && self.shell_code.len() < K_TMPL_X86.len())
         {
-            println!("Warning: Invalid shellcode generated");
+            println!("!!!!!!!!!Warning: Invalid shellcode generated!!!!!");
         }
         println!("Building shellcode: {} bytes", self.shell_code.len());
     }

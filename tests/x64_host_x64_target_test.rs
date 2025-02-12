@@ -1,7 +1,7 @@
 ﻿use std::ffi::c_void;
 
 use windows::Win32::{
-    Foundation::HANDLE,
+    Foundation::{CloseHandle, HANDLE, HMODULE, WAIT_OBJECT_0},
     System::{
         Diagnostics::{
             Debug::ReadProcessMemory,
@@ -11,7 +11,10 @@ use windows::Win32::{
             },
         },
         Memory::PAGE_READWRITE,
-        Threading::{IsWow64Process, OpenProcess, PROCESS_ALL_ACCESS},
+        Threading::{
+            CreateRemoteThread, GetExitCodeThread, IsWow64Process, OpenProcess,
+            WaitForSingleObject, PROCESS_ALL_ACCESS,
+        },
     },
 };
 use yapi::{
@@ -145,6 +148,76 @@ fn test_message_box() -> Result<()> {
         }
 
         assert!(result == 1 || result == 0, "Unexpected MessageBoxA result");
+        Ok(())
+    }
+}
+
+#[test]
+fn test_loadlibrary() -> Result<()> {
+    unsafe {
+        let (process, pid) = find_explorer_process("explorer.exe")?;
+
+        let mut load_library =
+            YAPICall::<HMODULE>::new(process, "kernel32.dll", "LoadLibraryW", false)?
+                .set_dw64_ret(true)
+                .with_timeout(std::time::Duration::from_secs(50));
+
+        // DLL 경로를 UTF-16으로 인코딩 (null terminator 포함)
+        let dll_path = "dll_path_here.dll\0".encode_utf16().collect::<Vec<u16>>();
+
+        // 프로세스 메모리에 경로 문자열 쓰기
+        let dll_path_writer = ProcessWriter::new(
+            process,
+            unsafe {
+                std::slice::from_raw_parts(dll_path.as_ptr() as *const u8, dll_path.len() * 2)
+            },
+            PAGE_READWRITE,
+        )?;
+
+        // 경로 문자열의 주소
+        let dll_path_ptr = dll_path_writer.address().as_ptr() as u64;
+
+        let mut verify_buffer = vec![0u8; dll_path.len() * 2];
+        let mut bytes_read = 0;
+        let read_result = ReadProcessMemory(
+            process,
+            dll_path_ptr as *const c_void,
+            verify_buffer.as_mut_ptr() as *mut c_void,
+            verify_buffer.len(),
+            Some(&mut bytes_read),
+        );
+        println!("Memory read result: {:?}", read_result);
+        println!("Bytes read: {}", bytes_read);
+
+        // let thread = CreateRemoteThread(
+        //     process,
+        //     None,
+        //     0,
+        //     Some(std::mem::transmute(load_library.function_address)),
+        //     Some(dll_path_ptr as *const c_void),
+        //     0,
+        //     None,
+        // )?;
+        // // 스레드 완료 대기
+        // let wait_result = WaitForSingleObject(thread, 30);
+        // if wait_result != WAIT_OBJECT_0 {
+        //     CloseHandle(thread)?;
+        //     return Ok(());
+        // }
+
+        // // 스레드 종료 코드 확인
+        // let mut exit_code = 0;
+        // GetExitCodeThread(thread, &mut exit_code)?;
+        // CloseHandle(thread)?;
+        // println!("Thread exit code: {}", exit_code);
+
+        // LoadLibraryW 호출
+        let result = load_library.call_function(&[
+            dll_path_ptr, // lpLibFileName
+        ])?;
+
+        println!("LoadLibraryW result: {:?}", result);
+
         Ok(())
     }
 }
