@@ -1,0 +1,35 @@
+[package]
+name = "yapi-rs"
+version = "0.0.5"
+edition = "2021"
+description = "A Rust port of [Yet Another Process Injector] that reduce differences between x64, wow64 and x86 processes."
+authors = ["Kerilk"]
+license = "MIT OR Apache-2.0"
+keywords = ["windows", "injector", "injection", "dll-injection"]
+categories = ["api-bindings", "os::windows-apis"]
+
+
+[lib]
+name = "yapi"
+
+[dependencies]
+windows = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_Memory",
+    "Win32_System_SystemInformation",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_Security",
+    "Win32_System_LibraryLoader",
+    "Win32_System_SystemServices",
+] }
+thiserror = "2"
+scopeguard = "1"
+
+[dev-dependencies]
+windows = { version = "0.59", features = ["Win32_UI_WindowsAndMessaging"] }
+
+
+[features]
+unsafe_tests = []
