@@ -143,7 +143,7 @@ impl MemoryReader for Process64Reader {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
+// #[cfg(target_arch = "x86_64")]
 pub unsafe fn nt_wow64_read_virtual_memory64(
     process: ProcessHandleWrapper,
     base_address: u64,
@@ -166,40 +166,40 @@ pub unsafe fn nt_wow64_read_virtual_memory64(
     Ok(NTSTATUS(0))
 }
 
-#[cfg(target_arch = "x86")]
-pub unsafe fn nt_wow64_read_virtual_memory64(
-    process: ProcessHandleWrapper,
-    base_address: u64,
-    buffer: *mut c_void,
-    buffer_size: u64,
-    bytes_read: *mut u64,
-) -> Result<NTSTATUS> {
-    use std::sync::{LazyLock, Mutex};
-    use windows::Win32::System::LibraryLoader::GetProcAddress;
+// #[cfg(target_arch = "x86")]
+// pub unsafe fn nt_wow64_read_virtual_memory64(
+//     process: ProcessHandleWrapper,
+//     base_address: u64,
+//     buffer: *mut c_void,
+//     buffer_size: u64,
+//     bytes_read: *mut u64,
+// ) -> Result<NTSTATUS> {
+//     use std::sync::{LazyLock, Mutex};
+//     use windows::Win32::System::LibraryLoader::GetProcAddress;
 
-    static NT_WOW64_READ_VIRTUAL_MEMORY64: LazyLock<Mutex<Option<NtWow64ReadVirtualMemory64>>> =
-        LazyLock::new(|| Mutex::new(None));
+//     static NT_WOW64_READ_VIRTUAL_MEMORY: LazyLock<Mutex<Option<NtWow64ReadVirtualMemory>>> =
+//         LazyLock::new(|| Mutex::new(None));
 
-    let func = {
-        let mut guard = NT_WOW64_READ_VIRTUAL_MEMORY64.lock().map_err(|_| {
-            YapiError::Memory(MemoryError::OperationFailed {
-                operation: "Lock acquisition failed",
-            })
-        })?;
+//     let func = {
+//         let mut guard = NT_WOW64_READ_VIRTUAL_MEMORY.lock().map_err(|_| {
+//             YapiError::Memory(MemoryError::OperationFailed {
+//                 operation: "Lock acquisition failed",
+//             })
+//         })?;
 
-        if guard.is_none() {
-            let ntdll = super::get_ntdll64()?;
-            let func = GetProcAddress(
-                ntdll,
-                windows::core::PCSTR(b"NtWow64ReadVirtualMemory64\0".as_ptr()),
-            );
-            *guard = func.map(|f| unsafe { std::mem::transmute(f) });
-        }
+//         if guard.is_none() {
+//             let ntdll = super::get_ntdll64()?;
+//             let func = GetProcAddress(
+//                 ntdll,
+//                 windows::core::PCSTR(b"NtWow64ReadVirtualMemory\0".as_ptr()),
+//             );
+//             *guard = func.map(|f| unsafe { std::mem::transmute(f) });
+//         }
 
-        guard.ok_or(YapiError::Memory(MemoryError::OperationFailed {
-            operation: "Function not found",
-        }))?
-    };
+//         guard.ok_or(YapiError::Memory(MemoryError::OperationFailed {
+//             operation: "Function not found",
+//         }))?
+//     };
 
-    Ok(func(process, base_address, buffer, buffer_size, bytes_read))
-}
+//     Ok(func(process, base_address, buffer, buffer_size, bytes_read))
+// }

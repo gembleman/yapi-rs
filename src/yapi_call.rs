@@ -24,7 +24,12 @@ use windows::Win32::{
 pub struct YAPICall<R = u64> {
     pub target_process_handle: ProcessHandle,
     pub shell_code_memory: Option<ProcessWriter>,
+
+    #[cfg(target_arch = "x86_64")]
     pub function_address: u64,
+    #[cfg(target_arch = "x86")]
+    pub function_address: u32,
+    // 호스트가 64비트에서는 64비트, 32비트에서는 32비트 함수 주소
     pub dw64_ret: bool,
     pub timeout: Option<Duration>,
     pub yapi_arch: YapiArch,
@@ -103,7 +108,10 @@ where
         Ok(Self {
             target_process_handle,
             shell_code_memory: None,
+            #[cfg(target_arch = "x86_64")]
             function_address,
+            #[cfg(target_arch = "x86")]
+            function_address: function_address.try_into().unwrap(),
             dw64_ret: false,
             timeout: Some(Duration::from_secs(5)),
             yapi_arch,
@@ -248,6 +256,7 @@ where
                     }
                 }
             }
+            #[cfg(target_arch = "x86_64")]
             Architecture::X64 => {
                 match (self.yapi_arch.target_proc_arch, self.yapi_arch.func_arch) {
                     // 호스트가 64비트이고, 타깃 프로세스가 32비트, 함수가 32비트인 경우, 쉘코드도 32비트.
@@ -267,7 +276,7 @@ where
                     // 호스트가 64비트이고, 타깃 프로세스가 32비트(wow64), 함수가 64비트인 경우, 쉘코드도 32비트. - 브릿지 코드 사용.
                     (Architecture::X86, Architecture::X64) => {
                         #[cfg(debug_assertions)]
-                        println!("host is 64bit func is 64");
+                        println!("host is 64bit target is wow64, func is 64");
 
                         // 64비트 호스트에서
                         // 32비트 프로세스에
@@ -320,6 +329,11 @@ where
                     }
                 }
             }
+
+            #[cfg(target_arch = "x86")]
+            Architecture::X64 => {
+                todo!()
+            }
         };
 
         let timeout_ms = self
@@ -337,11 +351,17 @@ where
 
         let result = if self.yapi_arch.host_arch == Architecture::X86 || !self.dw64_ret {
             // 32비트 또는 dw64_ret이 false인 경우
+            #[cfg(debug_assertions)]
+            println!("32bit or dw64_ret is false");
+
             let mut exit_code = 0u32;
             GetExitCodeThread(thread_handle, &mut exit_code)?;
             unsafe { std::mem::transmute_copy(&exit_code) }
         } else {
             // 64비트이고 dw64_ret이 true인 경우
+            #[cfg(debug_assertions)]
+            println!("64bit and dw64_ret is true");
+
             let mut result: R = R::default();
             ReadProcessMemory(
                 self.target_process_handle.as_raw(),

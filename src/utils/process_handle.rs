@@ -101,14 +101,16 @@ impl ProcessHandle {
         let mut stack_size_value = stack_size.unwrap_or(0);
 
         #[cfg(debug_assertions)]
-        println!(
-            "Creating thread - Process: {:?}, Address: 0x{:X}, Param: 0x{:X}",
-            self.handle, start_address, parameter
-        );
-        println!(
-            "start adr u32 : 0x{:X}, parameter u32 0x{:X}",
-            start_address as u32, parameter as u32
-        );
+        {
+            println!(
+                "Creating thread - Process: {:?}, Address: 0x{:X}, Param: 0x{:X}",
+                self.handle, start_address, parameter
+            );
+            println!(
+                "start adr u32 : 0x{:X}, parameter u32 0x{:X}",
+                start_address as u32, parameter as u32
+            );
+        }
 
         // C++ 구현과 동일하게 stack_size 파라미터 처리
         let stack_size_ptr = if stack_size.is_some() {
