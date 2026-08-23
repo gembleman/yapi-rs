@@ -1,34 +1,30 @@
-﻿use std::{ffi::c_void, time::Duration};
+use std::ffi::c_void;
 
 use windows::Win32::{
-    Foundation::{CloseHandle, GetLastError, HANDLE, HMODULE, WAIT_OBJECT_0},
+    Foundation::HANDLE,
     System::{
         Diagnostics::{
             Debug::ReadProcessMemory,
             ToolHelp::{
-                CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+                CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
                 TH32CS_SNAPPROCESS,
             },
         },
         Memory::PAGE_READWRITE,
-        Threading::{
-            CreateRemoteThread, GetExitCodeThread, IsWow64Process, OpenProcess,
-            WaitForSingleObject, PROCESS_ALL_ACCESS,
-        },
+        Threading::{IsWow64Process, OpenProcess, PROCESS_ALL_ACCESS},
     },
 };
 use yapi::{
-    Architecture, MemoryError, ProcessError, ProcessHandle, ProcessWriter, Result, YAPICall,
-    YapiArch, YapiError,
+    Architecture, ProcessError, ProcessHandle, ProcessWriter, Result, YAPICall, YapiArch, YapiError,
 };
 
 // Helper function to find Explorer process
 pub unsafe fn find_explorer_process(target_process_name: &str) -> Result<(HANDLE, u32)> {
-    let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)?;
-    let mut pe32: PROCESSENTRY32W = std::mem::zeroed();
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }?;
+    let mut pe32: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
     pe32.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
 
-    if Process32FirstW(snapshot, &mut pe32).is_ok() {
+    if unsafe { Process32FirstW(snapshot, &mut pe32) }.is_ok() {
         loop {
             let process_name = String::from_utf16_lossy(
                 &pe32.szExeFile[..pe32
@@ -39,11 +35,12 @@ pub unsafe fn find_explorer_process(target_process_name: &str) -> Result<(HANDLE
             );
 
             if process_name.to_lowercase() == target_process_name {
-                let process = OpenProcess(PROCESS_ALL_ACCESS, false, pe32.th32ProcessID)?;
+                let process =
+                    unsafe { OpenProcess(PROCESS_ALL_ACCESS, false, pe32.th32ProcessID) }?;
                 return Ok((process, pe32.th32ProcessID));
             }
 
-            if !Process32NextW(snapshot, &mut pe32).is_ok() {
+            if !unsafe { Process32NextW(snapshot, &mut pe32) }.is_ok() {
                 break;
             }
         }

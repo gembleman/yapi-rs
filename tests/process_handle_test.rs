@@ -68,7 +68,7 @@ mod tests {
             }
 
             let thread = handle
-                .create_thread(false, None, thread_proc as u64, 0)
+                .create_thread(false, None, thread_proc as *const () as u64, 0)
                 .unwrap();
 
             let result = WaitForSingleObject(thread, Duration::from_secs(1).as_millis() as u32);

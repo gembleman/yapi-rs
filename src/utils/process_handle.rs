@@ -1,8 +1,7 @@
-﻿use super::memory_reader::*;
-use crate::{types::*, MemoryError, ProcessError, ThreadError, YapiError};
+use super::memory_reader::*;
+use crate::{MemoryError, ProcessError, ThreadError, YapiError, types::*};
 use std::{ffi::c_void, mem::zeroed};
 use windows::{
-    core::{s, w, PCSTR, PWSTR},
     Win32::{
         Foundation::*,
         System::{
@@ -12,20 +11,21 @@ use windows::{
             Threading::*,
         },
     },
+    core::{PCSTR, PWSTR, s, w},
 };
 
 // RtlCreateUserThread function type definition
 type RtlCreateUserThreadFn = unsafe extern "system" fn(
-    ProcessHandle: HANDLE,
-    ThreadSecurityDescriptor: *const c_void,
-    CreateSuspended: bool,
-    ZeroBits: u32,
-    MaximumStackSize: *mut usize,
-    CommittedStackSize: *mut usize,
-    StartAddress: u64,
-    Parameter: u64,
-    ThreadHandle: *mut HANDLE,
-    ClientId: *mut c_void,
+    process_handle: HANDLE,
+    thread_security_descriptor: *const c_void,
+    create_suspended: bool,
+    zero_bits: u32,
+    maximum_stack_size: *mut usize,
+    committed_stack_size: *mut usize,
+    start_address: u64,
+    parameter: u64,
+    thread_handle: *mut HANDLE,
+    client_id: *mut c_void,
 ) -> NTSTATUS;
 
 #[derive(Debug, Clone)]
@@ -119,18 +119,20 @@ impl ProcessHandle {
             std::ptr::null_mut()
         };
 
-        let status = rtl_create_user_thread(
-            self.handle.into(),
-            std::ptr::null(), // lpThreadAttributes
-            create_suspended, // createSuspended
-            0,                // ZeroBits
-            stack_size_ptr,   // MaximumStackSize
-            stack_size_ptr,   // CommittedStackSize (같은 값 사용)
-            start_address,
-            parameter,
-            &mut thread_handle,
-            std::ptr::null_mut(), // ClientId
-        );
+        let status = unsafe {
+            rtl_create_user_thread(
+                self.handle.into(),
+                std::ptr::null(), // lpThreadAttributes
+                create_suspended, // createSuspended
+                0,                // ZeroBits
+                stack_size_ptr,   // MaximumStackSize
+                stack_size_ptr,   // CommittedStackSize (같은 값 사용)
+                start_address,
+                parameter,
+                &mut thread_handle,
+                std::ptr::null_mut(), // ClientId
+            )
+        };
 
         if status.is_ok() {
             Ok(thread_handle)

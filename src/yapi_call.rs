@@ -1,9 +1,9 @@
-﻿use crate::error::*;
-use crate::types::*;
-use crate::utils::*;
 use crate::Architecture::*;
 use crate::ProcessWriter;
 use crate::ShellCodeBuilder;
+use crate::error::*;
+use crate::types::*;
+use crate::utils::*;
 
 use std::ffi::c_void;
 use std::marker::PhantomData;
@@ -182,6 +182,7 @@ where
     }
 
     unsafe fn execute_remote_thread(&mut self, param_address: *mut c_void) -> Result<R> {
+        #[cfg(target_arch = "x86_64")]
         let shell_code_addr = self.shell_code_memory.as_ref().unwrap().address().as_ptr() as u64;
 
         let thread_handle = match self.yapi_arch.host_arch {
@@ -191,13 +192,15 @@ where
                     (Architecture::X86, Architecture::X86) => {
                         #[cfg(debug_assertions)]
                         println!("host is 32bit func is 32");
-                        self.target_process_handle.create_thread(
-                            false,
-                            None,
-                            self.shell_code_memory.as_ref().unwrap().address().as_ptr() as u32
-                                as u64,
-                            param_address as u32 as u64,
-                        )?
+                        unsafe {
+                            self.target_process_handle.create_thread(
+                                false,
+                                None,
+                                self.shell_code_memory.as_ref().unwrap().address().as_ptr() as u32
+                                    as u64,
+                                param_address as u32 as u64,
+                            )
+                        }?
                     }
                     //WOW64(32비트) 호스트에서 64비트 타겟 프로세스의 64비트 API를 호출할 때
                     (Architecture::X64, Architecture::X64) => {
@@ -242,12 +245,14 @@ where
                             PAGE_EXECUTE_READWRITE,
                         )?;
 
-                        self.target_process_handle.create_thread(
-                            false,
-                            None,
-                            bridge_code_mem.address().as_ptr() as u64,
-                            param_address as u32 as u64,
-                        )?
+                        unsafe {
+                            self.target_process_handle.create_thread(
+                                false,
+                                None,
+                                bridge_code_mem.address().as_ptr() as u64,
+                                param_address as u32 as u64,
+                            )
+                        }?
                     }
                     _ => {
                         return Err(YapiError::Custom(
@@ -263,15 +268,17 @@ where
                     (Architecture::X86, Architecture::X86) => {
                         #[cfg(debug_assertions)]
                         println!("host is 64bit func is wow32");
-                        CreateRemoteThread(
-                            self.target_process_handle.as_raw(),
-                            None,
-                            0,
-                            Some(std::mem::transmute(shell_code_addr)),
-                            Some(param_address),
-                            0,
-                            None,
-                        )?
+                        unsafe {
+                            CreateRemoteThread(
+                                self.target_process_handle.as_raw(),
+                                None,
+                                0,
+                                Some(std::mem::transmute(shell_code_addr)),
+                                Some(param_address),
+                                0,
+                                None,
+                            )
+                        }?
                     }
                     // 호스트가 64비트이고, 타깃 프로세스가 32비트(wow64), 함수가 64비트인 경우, 쉘코드도 32비트. - 브릿지 코드 사용.
                     (Architecture::X86, Architecture::X64) => {
@@ -294,15 +301,17 @@ where
                             &K_TMPL_X64_TO_X86,
                             PAGE_EXECUTE_READWRITE,
                         )?;
-                        CreateRemoteThread(
-                            self.target_process_handle.as_raw(),
-                            None,
-                            0,
-                            Some(std::mem::transmute(bridge_code_mem.address().as_ptr())),
-                            Some(param_address),
-                            0,
-                            None,
-                        )?
+                        unsafe {
+                            CreateRemoteThread(
+                                self.target_process_handle.as_raw(),
+                                None,
+                                0,
+                                Some(std::mem::transmute(bridge_code_mem.address().as_ptr())),
+                                Some(param_address),
+                                0,
+                                None,
+                            )
+                        }?
                     }
 
                     // 호스트가 64비트이고, 타깃 프로세스가 64비트, 함수도 64비트인 경우, 쉘코드도 64비트.
@@ -311,15 +320,17 @@ where
                         println!("host is 64bit func is 64");
                         println!("shell_code_addr: 0x{:X}", shell_code_addr);
 
-                        CreateRemoteThread(
-                            self.target_process_handle.as_raw(),
-                            None,
-                            0,
-                            Some(std::mem::transmute(shell_code_addr)),
-                            Some(param_address),
-                            0,
-                            None,
-                        )?
+                        unsafe {
+                            CreateRemoteThread(
+                                self.target_process_handle.as_raw(),
+                                None,
+                                0,
+                                Some(std::mem::transmute(shell_code_addr)),
+                                Some(param_address),
+                                0,
+                                None,
+                            )
+                        }?
                     }
                     // 호스트가 64비트이고, 타깃 프로세스가 64비트, 함수가 32비트인 경우, 에러.
                     (Architecture::X64, Architecture::X86) => {
@@ -341,9 +352,9 @@ where
             .map(|d| d.as_millis() as u32)
             .unwrap_or(INFINITE);
 
-        if WaitForSingleObject(thread_handle, timeout_ms) != WAIT_OBJECT_0 {
+        if unsafe { WaitForSingleObject(thread_handle, timeout_ms) } != WAIT_OBJECT_0 {
             self.shell_code_memory.as_mut().map(|sc| sc.dont_free());
-            CloseHandle(thread_handle)?;
+            unsafe { CloseHandle(thread_handle) }?;
             return Err(YapiError::Thread(ThreadError::TimeoutError {
                 ms: timeout_ms,
             }));
@@ -355,7 +366,7 @@ where
             println!("32bit or dw64_ret is false");
 
             let mut exit_code = 0u32;
-            GetExitCodeThread(thread_handle, &mut exit_code)?;
+            unsafe { GetExitCodeThread(thread_handle, &mut exit_code) }?;
             unsafe { std::mem::transmute_copy(&exit_code) }
         } else {
             // 64비트이고 dw64_ret이 true인 경우
@@ -363,17 +374,19 @@ where
             println!("64bit and dw64_ret is true");
 
             let mut result: R = R::default();
-            ReadProcessMemory(
-                self.target_process_handle.as_raw(),
-                param_address,
-                &mut result as *mut R as *mut c_void,
-                std::mem::size_of::<R>(),
-                None,
-            )?;
+            unsafe {
+                ReadProcessMemory(
+                    self.target_process_handle.as_raw(),
+                    param_address,
+                    &mut result as *mut R as *mut c_void,
+                    std::mem::size_of::<R>(),
+                    None,
+                )
+            }?;
             result
         };
 
-        CloseHandle(thread_handle)?;
+        unsafe { CloseHandle(thread_handle) }?;
         Ok(result)
     }
 

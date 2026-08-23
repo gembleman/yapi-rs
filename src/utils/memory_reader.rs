@@ -1,4 +1,4 @@
-﻿use crate::{types::*, MemoryError, YapiError};
+use crate::{MemoryError, YapiError, types::*};
 use std::{ffi::c_void, mem::zeroed};
 use windows::Win32::{Foundation::NTSTATUS, System::Diagnostics::Debug::ReadProcessMemory};
 
@@ -153,16 +153,18 @@ pub unsafe fn nt_wow64_read_virtual_memory64(
 ) -> Result<NTSTATUS> {
     let mut bytes_read_32 = 0usize;
 
-    ReadProcessMemory(
-        process.into(),
-        base_address as *const c_void,
-        buffer,
-        buffer_size as usize,
-        Some(&mut bytes_read_32),
-    )
-    .map_err(|e| YapiError::Windows(e))?;
+    unsafe {
+        ReadProcessMemory(
+            process.into(),
+            base_address as *const c_void,
+            buffer,
+            buffer_size as usize,
+            Some(&mut bytes_read_32),
+        )
+        .map_err(YapiError::Windows)?;
 
-    *bytes_read = bytes_read_32 as u64;
+        *bytes_read = bytes_read_32 as u64;
+    }
     Ok(NTSTATUS(0))
 }
 

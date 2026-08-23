@@ -1,4 +1,4 @@
-﻿use crate::{types::*, MemoryError, YapiError};
+use crate::{MemoryError, YapiError, types::*};
 use std::ffi::c_void;
 use std::ptr::NonNull;
 use windows::Win32::{
@@ -6,8 +6,8 @@ use windows::Win32::{
     System::{
         Diagnostics::Debug::WriteProcessMemory,
         Memory::{
-            VirtualAllocEx, VirtualFreeEx, MEM_COMMIT, MEM_DECOMMIT, MEM_RESERVE,
-            PAGE_PROTECTION_FLAGS,
+            MEM_COMMIT, MEM_DECOMMIT, MEM_RESERVE, PAGE_PROTECTION_FLAGS, VirtualAllocEx,
+            VirtualFreeEx,
         },
     },
 };

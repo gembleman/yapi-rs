@@ -1,9 +1,9 @@
-﻿use std::time::Duration;
+use std::time::Duration;
 use windows::Win32::{
     Foundation::{CloseHandle, HANDLE},
     System::{
         Diagnostics::ToolHelp::{
-            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+            CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
             TH32CS_SNAPPROCESS,
         },
         Memory::PAGE_READWRITE,
@@ -15,15 +15,15 @@ use yapi::{ProcessError, ProcessWriter, Result, YAPICall, YapiError};
 
 /// Helper function to find a target process by name
 unsafe fn find_target_process(target_process_name: &str) -> Result<(HANDLE, u32)> {
-    let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)?;
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }?;
     let _guard = scopeguard::guard(snapshot, |h| {
-        let _ = CloseHandle(h);
+        let _ = unsafe { CloseHandle(h) };
     });
 
-    let mut pe32: PROCESSENTRY32W = std::mem::zeroed();
+    let mut pe32: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
     pe32.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
 
-    if Process32FirstW(snapshot, &mut pe32).is_ok() {
+    if unsafe { Process32FirstW(snapshot, &mut pe32) }.is_ok() {
         loop {
             let process_name = String::from_utf16_lossy(
                 &pe32.szExeFile[..pe32
@@ -35,11 +35,12 @@ unsafe fn find_target_process(target_process_name: &str) -> Result<(HANDLE, u32)
 
             if process_name.to_lowercase() == target_process_name.to_lowercase() {
                 // 프로세스를 찾았을 때 모든 필요한 권한으로 열기
-                let process = OpenProcess(PROCESS_ALL_ACCESS, false, pe32.th32ProcessID)?;
+                let process =
+                    unsafe { OpenProcess(PROCESS_ALL_ACCESS, false, pe32.th32ProcessID) }?;
                 return Ok((process, pe32.th32ProcessID));
             }
 
-            if !Process32NextW(snapshot, &mut pe32).is_ok() {
+            if !unsafe { Process32NextW(snapshot, &mut pe32) }.is_ok() {
                 break;
             }
         }
