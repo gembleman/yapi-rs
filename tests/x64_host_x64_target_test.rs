@@ -51,6 +51,13 @@ pub unsafe fn find_explorer_process(target_process_name: &str) -> Result<(HANDLE
     }))
 }
 
+/// 대화형 테스트: explorer.exe에 MessageBoxA를 띄우고 사람이 확인을 누를 때까지
+/// 원격 스레드가 멈춘다. 기본 스위트에서는 제외되며 아래처럼 따로 실행한다.
+///
+/// ```text
+/// cargo test --target x86_64-pc-windows-msvc --test x64_host_x64_target_test -- --ignored
+/// ```
+#[ignore]
 #[test]
 fn test_message_box() -> Result<()> {
     unsafe {
