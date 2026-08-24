@@ -1,12 +1,11 @@
 ﻿use thiserror::Error;
-use windows::core;
 
 /// Represents all possible errors that can occur in the YAPI library
 #[derive(Debug, Error)]
 pub enum YapiError {
     /// Errors from Windows API calls
     #[error("Windows error: {0}")]
-    Windows(#[from] core::Error),
+    Windows(u32),
 
     /// Memory-related errors
     #[error(transparent)]

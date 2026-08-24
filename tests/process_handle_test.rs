@@ -1,4 +1,4 @@
-﻿use windows::Win32::System::Threading::GetCurrentProcess;
+use windows_sys::Win32::System::Threading::GetCurrentProcess;
 use yapi::{Architecture, ProcessHandle, YapiArch};
 
 #[test]
@@ -17,7 +17,7 @@ fn test_get_module_handle() {
 mod tests {
     use super::*;
     use std::{ffi::c_void, time::Duration};
-    use windows::Win32::System::Threading::{GetCurrentProcess, WaitForSingleObject};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, WaitForSingleObject};
 
     #[test]
     fn test_process_handle_creation() {
@@ -72,7 +72,7 @@ mod tests {
                 .unwrap();
 
             let result = WaitForSingleObject(thread, Duration::from_secs(1).as_millis() as u32);
-            let r = result.0;
+            let r = result;
             assert_eq!(r, 0);
         }
     }

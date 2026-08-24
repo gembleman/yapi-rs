@@ -1,7 +1,7 @@
 use super::memory_reader::*;
 use crate::{MemoryError, ProcessError, ThreadError, YapiError, types::*};
 use std::{ffi::c_void, mem::zeroed};
-use windows::{
+use windows_sys::{
     Win32::{
         Foundation::*,
         System::{
@@ -10,14 +10,14 @@ use windows::{
             Threading::*,
         },
     },
-    core::{PWSTR, s, w},
+    core::{s, w},
 };
 
 // RtlCreateUserThread function type definition
 type RtlCreateUserThreadFn = unsafe extern "system" fn(
     process_handle: HANDLE,
     thread_security_descriptor: *const c_void,
-    create_suspended: bool,
+    create_suspended: u8,
     zero_bits: u32,
     maximum_stack_size: *mut usize,
     committed_stack_size: *mut usize,
@@ -42,12 +42,18 @@ impl ProcessHandle {
         // C++ 원본처럼 OpenProcess로 연 실제 핸들이 필요하다.
         // 전역 캐시를 재사용하므로 인스턴스마다 핸들을 새로 열지 않는다(누수 방지).
         let current_pseudo = unsafe { GetCurrentProcess() };
-        let handle = if handle.0.is_null() || handle == current_pseudo {
+        let handle = if handle.is_null() || handle == current_pseudo {
             match crate::utils::memory_reader::self_real_handle() {
                 Some(real) => real,
                 None => {
                     let pid = unsafe { GetProcessId(current_pseudo) };
-                    unsafe { OpenProcess(PROCESS_ALL_ACCESS, false, pid)? }
+                    let opened = unsafe { OpenProcess(PROCESS_ALL_ACCESS, 0, pid) };
+                    if opened.is_null() {
+                        return Err(YapiError::Process(ProcessError::OperationFailed {
+                            operation: "OpenProcess",
+                        }));
+                    }
+                    opened
                 }
             }
         } else {
@@ -66,11 +72,18 @@ impl ProcessHandle {
 
         let rtl_create_user_thread = unsafe {
             // ntdll.dll 로드
-            let ntdll = windows::Win32::System::LibraryLoader::GetModuleHandleW(w!("ntdll.dll"))?;
+            let ntdll =
+                windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(w!("ntdll.dll"));
+            if ntdll.is_null() {
+                return Err(YapiError::Process(ProcessError::FunctionNotFound {
+                    name: "RtlCreateUserThread".to_string(),
+                    module: "ntdll.dll".to_string(),
+                }));
+            }
 
             // RtlCreateUserThread 함수 주소 가져오기
             let func: RtlCreateUserThreadFn = std::mem::transmute(
-                windows::Win32::System::LibraryLoader::GetProcAddress(
+                windows_sys::Win32::System::LibraryLoader::GetProcAddress(
                     ntdll,
                     s!("RtlCreateUserThread"),
                 )
@@ -113,7 +126,7 @@ impl ProcessHandle {
             })
         })?;
 
-        let mut thread_handle = HANDLE::default();
+        let mut thread_handle: HANDLE = std::ptr::null_mut();
         let mut stack_size_value = stack_size.unwrap_or(0);
 
         #[cfg(debug_assertions)]
@@ -147,7 +160,7 @@ impl ProcessHandle {
             rtl_create_user_thread(
                 self.handle.into(),
                 std::ptr::null(),         // lpThreadAttributes
-                create_suspended,         // createSuspended
+                create_suspended as u8,   // createSuspended (BOOLEAN)
                 0,                        // ZeroBits
                 std::ptr::null_mut(),     // MaximumStackSize (기본 예약 크기)
                 committed_stack_size_ptr, // CommittedStackSize
@@ -159,7 +172,7 @@ impl ProcessHandle {
         };
 
         // 게이트 경로와 동일하게 성공 + 눌 핸들을 함께 걸러낸다
-        if status.is_ok() && !thread_handle.0.is_null() {
+        if status >= 0 && !thread_handle.is_null() {
             Ok(thread_handle)
         } else {
             Err(YapiError::Thread(ThreadError::CreationFailed {
@@ -271,22 +284,30 @@ impl ProcessHandle {
         unsafe {
             let process_id = GetProcessId(self.handle.into());
             let snapshot =
-                CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, process_id)?;
+                CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, process_id);
+            if snapshot.is_null() {
+                return Err(YapiError::Process(ProcessError::ModuleNotFound {
+                    name: module_name.to_string(),
+                }));
+            }
             let mut me32: MODULEENTRY32W = zeroed();
             me32.dwSize = std::mem::size_of::<MODULEENTRY32W>() as u32;
 
-            if !Module32FirstW(snapshot, &mut me32).is_ok() {
-                CloseHandle(snapshot)?;
+            if Module32FirstW(snapshot, &mut me32) == 0 {
+                CloseHandle(snapshot);
                 return Err(YapiError::Process(ProcessError::ModuleNotFound {
                     name: module_name.to_string(),
                 }));
             }
 
             let result = loop {
-                let current_name = PWSTR::from_raw(me32.szModule.as_mut_ptr());
-                if let Ok(current_str) = current_name.to_string()
-                    && current_str.to_uppercase() == module_name.to_uppercase()
-                {
+                let name_len = me32
+                    .szModule
+                    .iter()
+                    .position(|&ch| ch == 0)
+                    .unwrap_or(me32.szModule.len());
+                let current_str = String::from_utf16_lossy(&me32.szModule[..name_len]);
+                if current_str.to_uppercase() == module_name.to_uppercase() {
                     break Ok(ModuleInfo {
                         base_address: me32.modBaseAddr as u64,
                         size: me32.modBaseSize,
@@ -294,14 +315,14 @@ impl ProcessHandle {
                     });
                 }
 
-                if !Module32NextW(snapshot, &mut me32).is_ok() {
+                if Module32NextW(snapshot, &mut me32) == 0 {
                     break Err(YapiError::Process(ProcessError::ModuleNotFound {
                         name: module_name.to_string(),
                     }));
                 }
             };
 
-            CloseHandle(snapshot)?;
+            CloseHandle(snapshot);
             result
         }
     }

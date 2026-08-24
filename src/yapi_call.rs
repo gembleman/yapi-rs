@@ -9,15 +9,14 @@ use std::ffi::c_void;
 use std::marker::PhantomData;
 use std::mem::zeroed;
 use std::time::Duration;
-use windows::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
-use windows::Win32::{
-    Foundation::{CloseHandle, FALSE, GetLastError, HANDLE},
-    System::{
-        Diagnostics::{Debug::ReadProcessMemory, ToolHelp::*},
-        Memory::*,
-        SystemInformation::*,
-        Threading::*,
-    },
+use windows_sys::Win32::Foundation::{
+    CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
+use windows_sys::Win32::System::{
+    Diagnostics::{Debug::ReadProcessMemory, ToolHelp::*},
+    Memory::*,
+    SystemInformation::*,
+    Threading::*,
 };
 
 fn result_from_thread_exit_code<R>(exit_code: u32) -> Result<R>
@@ -71,9 +70,11 @@ where
 
         // 프로세스 아키텍처 감지 (IsWow64Process 실패는 오류로 처리)
         let target_proc_arch = unsafe {
-            let mut is_wow64 = FALSE;
-            IsWow64Process(target_process, &mut is_wow64).map_err(YapiError::Windows)?;
-            if host_arch == X64 && is_wow64.as_bool() {
+            let mut is_wow64 = 0;
+            if IsWow64Process(target_process, &mut is_wow64) == 0 {
+                return Err(YapiError::Windows(GetLastError()));
+            }
+            if host_arch == X64 && is_wow64 != 0 {
                 X86
             } else {
                 host_arch
@@ -220,15 +221,14 @@ where
                     let mut buffer = vec![0u8; param_buffer.size];
                     let mut bytes_read = 0;
 
-                    ReadProcessMemory(
+                    let ok = ReadProcessMemory(
                         self.target_process_handle.as_raw(),
                         param_buffer.address().as_ptr(),
                         buffer.as_mut_ptr() as *mut c_void,
                         buffer.len(),
-                        Some(&mut bytes_read),
-                    )
-                    .map(|_| buffer)
-                    .unwrap_or_default()
+                        &mut bytes_read,
+                    );
+                    if ok != 0 { buffer } else { Vec::new() }
                 };
 
                 if buffer_bytes.is_empty() {
@@ -293,18 +293,22 @@ where
 
                 #[cfg(target_arch = "x86_64")]
                 {
-                    CreateRemoteThread(
+                    let thread_handle = CreateRemoteThread(
                         self.target_process_handle.as_raw(),
-                        None,
+                        std::ptr::null(),
                         0,
                         Some(std::mem::transmute::<
                             u64,
                             unsafe extern "system" fn(*mut c_void) -> u32,
                         >(start_address)),
-                        Some(param_address),
+                        param_address,
                         0,
-                        None,
-                    )?
+                        std::ptr::null_mut(),
+                    );
+                    if thread_handle.is_null() {
+                        return Err(YapiError::Windows(GetLastError()));
+                    }
+                    thread_handle
                 }
             },
             // 64비트 함수 + wow64 대상: 스레드가 32비트 모드로 시작해 delegator를
@@ -333,18 +337,22 @@ where
                 // x64 호스트는 CreateRemoteThread로 wow64 타깃에 32비트 쉘코드를 실행한다
                 #[cfg(target_arch = "x86_64")]
                 {
-                    CreateRemoteThread(
+                    let thread_handle = CreateRemoteThread(
                         self.target_process_handle.as_raw(),
-                        None,
+                        std::ptr::null(),
                         0,
                         Some(std::mem::transmute::<
                             u64,
                             unsafe extern "system" fn(*mut c_void) -> u32,
                         >(start_address)),
-                        Some(param_address),
+                        param_address,
                         0,
-                        None,
-                    )?
+                        std::ptr::null_mut(),
+                    );
+                    if thread_handle.is_null() {
+                        return Err(YapiError::Windows(GetLastError()));
+                    }
+                    thread_handle
                 }
 
                 // 32비트 호스트는 RtlCreateUserThread로 스레드를 생성한다
@@ -387,7 +395,7 @@ where
             // WAIT_FAILED 등: 타임아웃이 아니라 대기 자체가 실패했다
             let last_error = unsafe { GetLastError() };
             return Err(YapiError::Thread(ThreadError::WaitFailed {
-                reason: format!("GetLastError=0x{:08X}", last_error.0),
+                reason: format!("GetLastError=0x{:08X}", last_error),
             }));
         }
 
@@ -397,7 +405,9 @@ where
             println!("32bit or dw64_ret is false");
 
             let mut exit_code = 0u32;
-            unsafe { GetExitCodeThread(thread_handle, &mut exit_code) }?;
+            if unsafe { GetExitCodeThread(thread_handle, &mut exit_code) } == 0 {
+                return Err(YapiError::Windows(unsafe { GetLastError() }));
+            }
             result_from_thread_exit_code(exit_code)?
         } else {
             // 64비트 결과이고 dw64_ret이 true인 경우: 파라미터 버퍼에서 값을 읽는다.
@@ -415,14 +425,17 @@ where
 
             let mut result: R = R::default();
             unsafe {
-                ReadProcessMemory(
+                let ok = ReadProcessMemory(
                     self.target_process_handle.as_raw(),
                     param_address,
                     &mut result as *mut R as *mut c_void,
                     std::mem::size_of::<R>(),
-                    None,
-                )
-            }?;
+                    std::ptr::null_mut(),
+                );
+                if ok == 0 {
+                    return Err(YapiError::Windows(GetLastError()));
+                }
+            }
             result
         };
 
@@ -526,7 +539,7 @@ where
 
             if VirtualQueryEx(
                 self.target_process_handle.as_raw(),
-                Some(address as *const c_void),
+                address as *const c_void,
                 &mut mbi,
                 size,
             ) == 0
@@ -548,15 +561,18 @@ where
         size: usize,
         protect: PAGE_PROTECTION_FLAGS,
     ) -> Result<PAGE_PROTECTION_FLAGS> {
-        let mut old_protect = PAGE_PROTECTION_FLAGS(0);
+        let mut old_protect = 0;
         unsafe {
-            VirtualProtectEx(
+            let ok = VirtualProtectEx(
                 self.target_process_handle.as_raw(),
                 address as *const c_void,
                 size,
                 protect,
                 &mut old_protect,
-            )?;
+            );
+            if ok == 0 {
+                return Err(YapiError::Windows(GetLastError()));
+            }
         }
         Ok(old_protect)
     }
@@ -566,7 +582,10 @@ where
             let snapshot = CreateToolhelp32Snapshot(
                 TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32,
                 GetProcessId(self.target_process_handle.as_raw()),
-            )?;
+            );
+            if snapshot.is_null() || snapshot == INVALID_HANDLE_VALUE {
+                return Err(YapiError::Windows(GetLastError()));
+            }
 
             let _guard = scopeguard::guard(snapshot, |h| {
                 let _ = CloseHandle(h);
@@ -576,7 +595,9 @@ where
             me32.dwSize = std::mem::size_of::<MODULEENTRY32W>() as u32;
 
             // 열거 시작 실패(권한 부족 등)는 빈 결과가 아니라 오류로 알린다
-            Module32FirstW(snapshot, &mut me32)?;
+            if Module32FirstW(snapshot, &mut me32) == 0 {
+                return Err(YapiError::Windows(GetLastError()));
+            }
             loop {
                 let module_name = String::from_utf16_lossy(
                     &me32.szModule[..me32
@@ -592,7 +613,7 @@ where
                     name: module_name,
                 });
 
-                if !Module32NextW(snapshot, &mut me32).is_ok() {
+                if Module32NextW(snapshot, &mut me32) == 0 {
                     break;
                 }
             }

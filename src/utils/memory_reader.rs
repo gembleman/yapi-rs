@@ -5,15 +5,18 @@ use std::{
     sync::{LazyLock, Mutex},
 };
 #[cfg(target_arch = "x86_64")]
-use windows::Win32::System::Diagnostics::Debug::WriteProcessMemory;
-use windows::Win32::{
-    Foundation::{HANDLE, NTSTATUS},
-    System::{
-        Diagnostics::Debug::ReadProcessMemory,
-        LibraryLoader::{GetModuleHandleW, GetProcAddress},
+use windows_sys::Win32::System::Diagnostics::Debug::WriteProcessMemory;
+use windows_sys::{
+    Win32::{
+        Foundation::{HANDLE, NTSTATUS},
+        System::{
+            Diagnostics::Debug::ReadProcessMemory,
+            LibraryLoader::{GetModuleHandleW, GetProcAddress},
+            Threading::{GetCurrentProcess, GetProcessId, OpenProcess, PROCESS_ALL_ACCESS},
+        },
     },
+    core::w,
 };
-use windows::core::{PCSTR, w};
 
 use super::nt_success;
 
@@ -33,8 +36,7 @@ pub(crate) fn ensure_real_handle(process: HANDLE) -> HANDLE {
 
 /// process가 현재 프로세스를 가리키면 캐시된 실제 핸들을 반환한다.
 fn self_real_handle_or_none(process: HANDLE) -> Option<HANDLE> {
-    let is_pseudo = process.0.is_null()
-        || unsafe { process == windows::Win32::System::Threading::GetCurrentProcess() };
+    let is_pseudo = process.is_null() || unsafe { process == GetCurrentProcess() };
     if is_pseudo { self_real_handle() } else { None }
 }
 
@@ -46,18 +48,13 @@ pub(crate) fn self_real_handle() -> Option<HANDLE> {
     let mut cached = SELF_REAL_HANDLE.lock().unwrap_or_else(|e| e.into_inner());
     if cached.is_none() {
         *cached = unsafe {
-            let pseudo = windows::Win32::System::Threading::GetCurrentProcess();
-            let pid = windows::Win32::System::Threading::GetProcessId(pseudo);
-            windows::Win32::System::Threading::OpenProcess(
-                windows::Win32::System::Threading::PROCESS_ALL_ACCESS,
-                false,
-                pid,
-            )
-            .ok()
-            .map(|h| h.0 as usize)
+            let pseudo = GetCurrentProcess();
+            let pid = GetProcessId(pseudo);
+            let handle = OpenProcess(PROCESS_ALL_ACCESS, 0, pid);
+            (!handle.is_null()).then_some(handle as usize)
         };
     }
-    cached.map(|v| HANDLE(v as *mut core::ffi::c_void))
+    cached.map(|v| v as HANDLE)
 }
 
 // Memory reading trait with additional helper method
@@ -120,14 +117,16 @@ impl MemoryReader for Process32Reader {
             let size = std::mem::size_of::<T>();
             let mut bytes_read = 0;
 
-            ReadProcessMemory(
+            if ReadProcessMemory(
                 self.process.as_raw(),
                 address as *const c_void,
                 &mut buffer as *mut T as *mut c_void,
                 size,
-                Some(&mut bytes_read),
-            )
-            .map_err(YapiError::Windows)?;
+                &mut bytes_read,
+            ) == 0
+            {
+                return Err(YapiError::Memory(MemoryError::ReadFailed { address, size }));
+            }
 
             Self::validate_read(bytes_read, size, address)?;
             Ok(buffer)
@@ -148,14 +147,16 @@ impl MemoryReader for Process32Reader {
             let size = std::mem::size_of::<T>() * count;
             let mut bytes_read = 0;
 
-            ReadProcessMemory(
+            if ReadProcessMemory(
                 self.process.as_raw(),
                 address as *const c_void,
                 buffer.as_mut_ptr() as *mut c_void,
                 size,
-                Some(&mut bytes_read),
-            )
-            .map_err(YapiError::Windows)?;
+                &mut bytes_read,
+            ) == 0
+            {
+                return Err(YapiError::Memory(MemoryError::ReadFailed { address, size }));
+            }
 
             Self::validate_read(bytes_read, size, address)?;
             Ok(buffer
@@ -252,8 +253,11 @@ type NtWow64WriteVirtualMemory64Fn = unsafe extern "system" fn(
 /// ntdll에서 이름으로 함수를 찾아 지정한 시그니처로 변환한다.
 unsafe fn resolve_ntdll_function<F>(name: &[u8]) -> Option<F> {
     unsafe {
-        let ntdll = GetModuleHandleW(w!("ntdll.dll")).ok()?;
-        let proc_addr = GetProcAddress(ntdll, PCSTR(name.as_ptr()))?;
+        let ntdll = GetModuleHandleW(w!("ntdll.dll"));
+        if ntdll.is_null() {
+            return None;
+        }
+        let proc_addr = GetProcAddress(ntdll, name.as_ptr())?;
         Some(std::mem::transmute_copy(&proc_addr))
     }
 }
@@ -358,14 +362,19 @@ pub unsafe fn nt_wow64_read_virtual_memory64(
     {
         let mut bytes_read_32 = 0usize;
         unsafe {
-            ReadProcessMemory(
+            if ReadProcessMemory(
                 process.into(),
                 base_address as *const c_void,
                 buffer,
                 buffer_size as usize,
-                Some(&mut bytes_read_32),
-            )
-            .map_err(YapiError::Windows)?;
+                &mut bytes_read_32,
+            ) == 0
+            {
+                return Err(YapiError::Memory(MemoryError::ReadFailed {
+                    address: base_address,
+                    size: buffer_size as usize,
+                }));
+            }
             *bytes_read = bytes_read_32 as u64;
         }
     }
@@ -413,14 +422,19 @@ pub unsafe fn nt_wow64_write_virtual_memory64(
     {
         let mut bytes_written_32 = 0usize;
         unsafe {
-            WriteProcessMemory(
+            if WriteProcessMemory(
                 process.into(),
                 base_address as *const c_void,
                 buffer,
                 buffer_size as usize,
-                Some(&mut bytes_written_32),
-            )
-            .map_err(YapiError::Windows)?;
+                &mut bytes_written_32,
+            ) == 0
+            {
+                return Err(YapiError::Memory(MemoryError::WriteFailed {
+                    address: base_address,
+                    size: buffer_size as usize,
+                }));
+            }
             *bytes_written = bytes_written_32 as u64;
         }
     }

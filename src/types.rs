@@ -1,5 +1,5 @@
 ﻿use crate::YapiError;
-use windows::Win32::Foundation::{HANDLE, NTSTATUS};
+use windows_sys::Win32::Foundation::{HANDLE, NTSTATUS};
 
 pub type Result<T> = std::result::Result<T, YapiError>;
 

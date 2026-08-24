@@ -1,5 +1,5 @@
 use std::ffi::c_void;
-use windows::Win32::System::{Memory::PAGE_READWRITE, Threading::GetCurrentProcess};
+use windows_sys::Win32::System::{Memory::PAGE_READWRITE, Threading::GetCurrentProcess};
 use yapi::{Architecture, ProcessHandle, ProcessWriter, YapiArch};
 
 #[test]
@@ -10,17 +10,17 @@ fn test_process_writer() {
         let writer = ProcessWriter::new(process, &data, PAGE_READWRITE).unwrap();
 
         let mut read_back = vec![0u8; 4];
-        let mut bytes_read = 0;
+        let mut bytes_read = 0usize;
 
-        let success = windows::Win32::System::Diagnostics::Debug::ReadProcessMemory(
+        let success = windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory(
             process,
             writer.address().as_ptr(),
             read_back.as_mut_ptr() as *mut c_void,
             4,
-            Some(&mut bytes_read),
+            &mut bytes_read,
         );
 
-        assert!(success.is_ok());
+        assert_ne!(success, 0);
         assert_eq!(bytes_read, 4);
         assert_eq!(&read_back, &data);
     }
@@ -43,8 +43,8 @@ fn test_get_module_handle_64_on_self() {
 }
 #[test]
 fn test_virtual_protect_on_self() {
-    use windows::Win32::System::Memory::PAGE_READONLY;
-    use windows::Win32::System::Threading::GetCurrentProcess;
+    use windows_sys::Win32::System::Memory::PAGE_READONLY;
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
     use yapi::{Architecture, ProcessHandle, ProcessWriter, YAPICall, YapiArch};
 
     unsafe {
@@ -82,7 +82,7 @@ fn test_call_64bit_ntdll_function_in_self() {
     // 자기 프로세스가 대상이다.
     // - x64 빌드(네이티브): 64비트 함수 호출 성공
     // - i686 빌드(wow64 프로세스): wow64 대상의 64비트 함수 호출은 미지원 오류를 반환해야 함
-    use windows::Win32::System::Threading::GetCurrentProcess;
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
     use yapi::YAPICall;
 
     unsafe {
@@ -109,7 +109,7 @@ fn test_call_64bit_ntdll_function_in_self() {
 #[cfg(target_arch = "x86")]
 #[test]
 fn test_gate_suspended_thread_diag() {
-    use windows::Win32::System::Threading::GetCurrentProcess;
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
     use yapi::{Architecture, ProcessHandle, YapiArch};
 
     unsafe {
@@ -137,31 +137,31 @@ fn test_gate_suspended_thread_diag() {
 fn test_call_64bit_function_in_native_x64_target() {
     // 네이티브 x64 프로세스(explorer.exe)의 64비트 ntdll 함수를 원격 호출한다.
     // C++ 데모와 동일 시나리오. i686 빌드에서는 헤븐즈 게이트 경로가 검증된다.
-    use windows::Win32::{
+    use windows_sys::Win32::{
         Foundation::{CloseHandle, HANDLE},
         System::Threading::{OpenProcess, PROCESS_ALL_ACCESS},
     };
     use yapi::YAPICall;
 
     unsafe {
-        let snapshot = windows::Win32::System::Diagnostics::ToolHelp::CreateToolhelp32Snapshot(
-            windows::Win32::System::Diagnostics::ToolHelp::TH32CS_SNAPPROCESS,
+        let snapshot = windows_sys::Win32::System::Diagnostics::ToolHelp::CreateToolhelp32Snapshot(
+            windows_sys::Win32::System::Diagnostics::ToolHelp::TH32CS_SNAPPROCESS,
             0,
-        )
-        .unwrap();
+        );
+        assert!(!snapshot.is_null());
         let _guard = scopeguard::guard(snapshot, |h| {
             let _ = CloseHandle(h);
         });
 
-        let mut pe32: windows::Win32::System::Diagnostics::ToolHelp::PROCESSENTRY32W =
+        let mut pe32: windows_sys::Win32::System::Diagnostics::ToolHelp::PROCESSENTRY32W =
             std::mem::zeroed();
         pe32.dwSize = std::mem::size_of::<
-            windows::Win32::System::Diagnostics::ToolHelp::PROCESSENTRY32W,
+            windows_sys::Win32::System::Diagnostics::ToolHelp::PROCESSENTRY32W,
         >() as u32;
 
         let mut target: Option<HANDLE> = None;
-        if windows::Win32::System::Diagnostics::ToolHelp::Process32FirstW(snapshot, &mut pe32)
-            .is_ok()
+        if windows_sys::Win32::System::Diagnostics::ToolHelp::Process32FirstW(snapshot, &mut pe32)
+            != 0
         {
             loop {
                 let name = String::from_utf16_lossy(
@@ -172,15 +172,15 @@ fn test_call_64bit_function_in_native_x64_target() {
                         .unwrap_or(pe32.szExeFile.len())],
                 );
                 if name.eq_ignore_ascii_case("explorer.exe") {
-                    if let Ok(h) = OpenProcess(PROCESS_ALL_ACCESS, false, pe32.th32ProcessID) {
+                    let h = OpenProcess(PROCESS_ALL_ACCESS, 0, pe32.th32ProcessID);
+                    if !h.is_null() {
                         target = Some(h);
                         break;
                     }
                 }
-                if !windows::Win32::System::Diagnostics::ToolHelp::Process32NextW(
+                if windows_sys::Win32::System::Diagnostics::ToolHelp::Process32NextW(
                     snapshot, &mut pe32,
-                )
-                .is_ok()
+                ) == 0
                 {
                     break;
                 }
@@ -198,6 +198,6 @@ fn test_call_64bit_function_in_native_x64_target() {
         println!("remote processor number = {r}");
         assert!(r < 65536);
 
-        CloseHandle(handle).unwrap();
+        assert_ne!(CloseHandle(handle), 0);
     }
 }

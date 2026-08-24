@@ -1,13 +1,13 @@
 use std::{
     process::Stdio,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Mutex, OnceLock,
+        atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
 };
-use windows::Win32::{
-    Foundation::{CloseHandle, HANDLE},
+use windows_sys::Win32::{
+    Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE},
     System::{
         Diagnostics::ToolHelp::{
             CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
@@ -22,7 +22,12 @@ use yapi::{ProcessError, ProcessWriter, Result, YAPICall, YapiError};
 
 /// Helper function to find a target process by name
 unsafe fn find_target_process(target_process_name: &str) -> Result<(HANDLE, u32)> {
-    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }?;
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE || snapshot.is_null() {
+        return Err(YapiError::Process(ProcessError::OperationFailed {
+            operation: "CreateToolhelp32Snapshot",
+        }));
+    }
     let _guard = scopeguard::guard(snapshot, |h| {
         let _ = unsafe { CloseHandle(h) };
     });
@@ -30,7 +35,7 @@ unsafe fn find_target_process(target_process_name: &str) -> Result<(HANDLE, u32)
     let mut pe32: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
     pe32.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
 
-    if unsafe { Process32FirstW(snapshot, &mut pe32) }.is_ok() {
+    if unsafe { Process32FirstW(snapshot, &mut pe32) } != 0 {
         loop {
             let process_name = String::from_utf16_lossy(
                 &pe32.szExeFile[..pe32
@@ -42,12 +47,14 @@ unsafe fn find_target_process(target_process_name: &str) -> Result<(HANDLE, u32)
 
             if process_name.to_lowercase() == target_process_name.to_lowercase() {
                 // 프로세스를 찾았을 때 모든 필요한 권한으로 열기
-                let process =
-                    unsafe { OpenProcess(PROCESS_ALL_ACCESS, false, pe32.th32ProcessID) }?;
+                let process = unsafe { OpenProcess(PROCESS_ALL_ACCESS, 0, pe32.th32ProcessID) };
+                if process.is_null() {
+                    continue;
+                }
                 return Ok((process, pe32.th32ProcessID));
             }
 
-            if !unsafe { Process32NextW(snapshot, &mut pe32) }.is_ok() {
+            if unsafe { Process32NextW(snapshot, &mut pe32) } == 0 {
                 break;
             }
         }
@@ -67,9 +74,8 @@ fn x86_test_exe_path() -> Option<std::path::PathBuf> {
             return Some(p);
         }
     }
-    let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
-        "tests/x86-for-test/target/i686-pc-windows-msvc/release/x86-for-test.exe",
-    );
+    let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/x86-for-test/target/i686-pc-windows-msvc/release/x86-for-test.exe");
     p.is_file().then_some(p)
 }
 
@@ -115,7 +121,9 @@ impl Drop for TargetGuard {
 /// 뮤텍스로 직렬화해 병렬 테스트의 이중 스폰을 막는다.
 unsafe fn ensure_x86_target() -> Result<Option<(HANDLE, u32, TargetGuard)>> {
     unsafe {
-        let mut slot = spawned_child_slot().lock().unwrap_or_else(|e| e.into_inner());
+        let mut slot = spawned_child_slot()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
 
         // 실행 중인 대상이 있으면 재사용한다 (외부 인스턴스 포함)
         if let Ok((process, pid)) = find_target_process("x86-for-test.exe") {
@@ -195,7 +203,7 @@ fn test_wow64_injection() -> Result<()> {
             0u64,                                  // hWnd (NULL)
             message_mem.address().as_ptr() as u64, // lpText
             caption_mem.address().as_ptr() as u64, // lpCaption
-            MB_OK.0 as u64,                        // uType
+            MB_OK as u64,                          // uType
         ];
 
         // 디버그 출력
@@ -203,7 +211,7 @@ fn test_wow64_injection() -> Result<()> {
         println!("  hWnd: NULL");
         println!("  lpText: 0x{:X}", message_mem.address().as_ptr() as u64);
         println!("  lpCaption: 0x{:X}", caption_mem.address().as_ptr() as u64);
-        println!("  uType: MB_OK ({})", MB_OK.0);
+        println!("  uType: MB_OK ({})", MB_OK);
 
         // 대상 프로세스에서 MessageBoxA 호출
         println!("Executing MessageBoxA in target process...");
@@ -211,7 +219,7 @@ fn test_wow64_injection() -> Result<()> {
         println!("MessageBoxA returned: {}", result);
 
         // 정리
-        CloseHandle(process_handle)?;
+        assert_ne!(CloseHandle(process_handle), 0);
 
         Ok(())
     }
@@ -240,7 +248,7 @@ fn test_process_writer_wow64() -> Result<()> {
 
         // std::thread::sleep(Duration::from_secs(10000));
 
-        CloseHandle(process_handle)?;
+        assert_ne!(CloseHandle(process_handle), 0);
         Ok(())
     }
 }
@@ -254,7 +262,7 @@ fn test_find_process() -> Result<()> {
         };
         println!("Found test process. PID: {}", pid);
         assert!(pid > 0, "Invalid process ID");
-        CloseHandle(handle)?;
+        assert_ne!(CloseHandle(handle), 0);
         Ok(())
     }
 }

@@ -2,7 +2,7 @@ use crate::utils::nt_wow64_write_virtual_memory64;
 use crate::{MemoryError, YapiError, types::*};
 use std::ffi::c_void;
 use std::ptr::NonNull;
-use windows::Win32::{
+use windows_sys::Win32::{
     Foundation::HANDLE,
     System::Memory::{
         MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_PROTECTION_FLAGS, VirtualAllocEx, VirtualFreeEx,
@@ -21,7 +21,13 @@ impl ProcessWriter {
     pub fn new(process: HANDLE, content: &[u8], protect: PAGE_PROTECTION_FLAGS) -> Result<Self> {
         unsafe {
             let size = content.len();
-            let address = VirtualAllocEx(process, None, size, MEM_COMMIT | MEM_RESERVE, protect);
+            let address = VirtualAllocEx(
+                process,
+                std::ptr::null(),
+                size,
+                MEM_COMMIT | MEM_RESERVE,
+                protect,
+            );
 
             // NonNull을 사용하여 null check를 한번에 처리
             let address = NonNull::new(address)

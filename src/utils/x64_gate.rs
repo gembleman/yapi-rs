@@ -9,7 +9,7 @@
 
 use crate::{MemoryError, Result, YapiError};
 use std::sync::{LazyLock, Mutex};
-use windows::Win32::{
+use windows_sys::Win32::{
     Foundation::{HANDLE, NTSTATUS},
     System::Memory::{MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE, VirtualAlloc},
 };
@@ -48,7 +48,7 @@ pub type X64GateFn = unsafe extern "C" fn(func: u64, arg_count: i32, ...) -> u64
 unsafe fn build_gate() -> Result<X64GateFn> {
     unsafe {
         let mem = VirtualAlloc(
-            None,
+            std::ptr::null(),
             X64_CALL.len(),
             MEM_COMMIT | MEM_RESERVE,
             PAGE_EXECUTE_READWRITE,
@@ -79,18 +79,20 @@ fn cached_gate() -> Result<X64GateFn> {
 fn resolve_local_ntdll_64_export(name: &[u8]) -> Option<u64> {
     // NtWow64*와 달리 게이트 경로는 의사 핸들을 받지 않으므로 실제 핸들을 연다
     let pid = unsafe {
-        windows::Win32::System::Threading::GetProcessId(
-            windows::Win32::System::Threading::GetCurrentProcess(),
+        windows_sys::Win32::System::Threading::GetProcessId(
+            windows_sys::Win32::System::Threading::GetCurrentProcess(),
         )
     };
     let handle = unsafe {
-        windows::Win32::System::Threading::OpenProcess(
-            windows::Win32::System::Threading::PROCESS_ALL_ACCESS,
-            false,
+        windows_sys::Win32::System::Threading::OpenProcess(
+            windows_sys::Win32::System::Threading::PROCESS_ALL_ACCESS,
+            0,
             pid,
         )
+    };
+    if handle.is_null() {
+        return None;
     }
-    .ok()?;
 
     let arch = crate::YapiArch::new(
         crate::Architecture::X64,
@@ -204,10 +206,10 @@ pub unsafe fn create_remote_thread_64_suspended(
         x64_call(
             func,
             &[
-                process.0 as usize as u64, // Process
-                0,                         // SecurityDescriptor (NULL)
-                suspended as u64,          // Suspended (BOOLEAN)
-                0,                         // ZeroBits
+                process as usize as u64, // Process
+                0,                       // SecurityDescriptor (NULL)
+                suspended as u64,        // Suspended (BOOLEAN)
+                0,                       // ZeroBits
                 &mut stack_size as *mut u64 as usize as u64,
                 &mut stack_size as *mut u64 as usize as u64,
                 start_address,
@@ -218,12 +220,12 @@ pub unsafe fn create_remote_thread_64_suspended(
         )?
     } as u32;
 
-    let status = NTSTATUS(status_raw as i32);
+    let status = status_raw as NTSTATUS;
     if !super::nt_success(status) || thread_handle == 0 {
         return Err(YapiError::Thread(crate::ThreadError::CreationFailed {
-            reason: format!("RtlCreateUserThread(64) failed with status {:#x}", status.0),
+            reason: format!("RtlCreateUserThread(64) failed with status {:#x}", status),
         }));
     }
 
-    Ok(HANDLE(thread_handle as usize as *mut core::ffi::c_void))
+    Ok(thread_handle as usize as HANDLE)
 }

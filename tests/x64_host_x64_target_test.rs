@@ -1,7 +1,7 @@
 use std::ffi::c_void;
 
-use windows::Win32::{
-    Foundation::HANDLE,
+use windows_sys::Win32::{
+    Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE},
     System::{
         Diagnostics::{
             Debug::ReadProcessMemory,
@@ -20,11 +20,19 @@ use yapi::{
 
 // Helper function to find Explorer process
 pub unsafe fn find_explorer_process(target_process_name: &str) -> Result<(HANDLE, u32)> {
-    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }?;
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE || snapshot.is_null() {
+        return Err(YapiError::Process(ProcessError::OperationFailed {
+            operation: "CreateToolhelp32Snapshot",
+        }));
+    }
+    let _guard = scopeguard::guard(snapshot, |h| {
+        let _ = unsafe { CloseHandle(h) };
+    });
     let mut pe32: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
     pe32.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
 
-    if unsafe { Process32FirstW(snapshot, &mut pe32) }.is_ok() {
+    if unsafe { Process32FirstW(snapshot, &mut pe32) } != 0 {
         loop {
             let process_name = String::from_utf16_lossy(
                 &pe32.szExeFile[..pe32
@@ -35,12 +43,14 @@ pub unsafe fn find_explorer_process(target_process_name: &str) -> Result<(HANDLE
             );
 
             if process_name.to_lowercase() == target_process_name {
-                let process =
-                    unsafe { OpenProcess(PROCESS_ALL_ACCESS, false, pe32.th32ProcessID) }?;
+                let process = unsafe { OpenProcess(PROCESS_ALL_ACCESS, 0, pe32.th32ProcessID) };
+                if process.is_null() {
+                    continue;
+                }
                 return Ok((process, pe32.th32ProcessID));
             }
 
-            if !unsafe { Process32NextW(snapshot, &mut pe32) }.is_ok() {
+            if unsafe { Process32NextW(snapshot, &mut pe32) } == 0 {
                 break;
             }
         }
@@ -93,13 +103,13 @@ fn test_message_box() -> Result<()> {
 
         // Verify memory contents
         let mut verify_buffer = vec![0u8; message_str.len()];
-        let mut bytes_read = 0;
+        let mut bytes_read = 0usize;
         let read_result = ReadProcessMemory(
             process,
             text_ptr as *const c_void,
             verify_buffer.as_mut_ptr() as *mut c_void,
             verify_buffer.len(),
-            Some(&mut bytes_read),
+            &mut bytes_read,
         );
 
         println!("Memory read result: {:?}", read_result);
@@ -209,9 +219,13 @@ fn test_module_enumeration() -> Result<()> {
         println!("[{}] Testing module enumeration", pid);
 
         // Check if target process is WOW64
-        let mut is_wow64 = false.into();
-        IsWow64Process(process, &mut is_wow64)?;
-        let target_arch = if is_wow64.as_bool() {
+        let mut is_wow64 = 0;
+        if IsWow64Process(process, &mut is_wow64) == 0 {
+            return Err(YapiError::Process(ProcessError::OperationFailed {
+                operation: "IsWow64Process",
+            }));
+        }
+        let target_arch = if is_wow64 != 0 {
             Architecture::X86
         } else {
             Architecture::X64
