@@ -37,7 +37,9 @@ pub struct ProcessHandle {
 
 impl ProcessHandle {
     pub fn new(handle: HANDLE, yapi_arch: YapiArch) -> Result<Self> {
-        let handle = if handle.is_invalid() {
+        // NULL 핸들만 현재 프로세스로 대체한다.
+        // INVALID 핸들은 그대로 통과시켜 이후 API 호출에서 오류로 드러나게 한다.
+        let handle = if handle.0.is_null() {
             unsafe { GetCurrentProcess() }
         } else {
             handle
@@ -111,8 +113,9 @@ impl ProcessHandle {
             );
         }
 
-        // C++ 구현과 동일하게 stack_size 파라미터 처리
-        let stack_size_ptr = if stack_size.is_some() {
+        // C++ 구현과 동일하게 MaximumStackSize=NULL(기본 예약 크기),
+        // CommittedStackSize=지정 값으로 전달한다
+        let committed_stack_size_ptr = if stack_size.is_some() {
             &mut stack_size_value
         } else {
             std::ptr::null_mut()
@@ -128,11 +131,11 @@ impl ProcessHandle {
         let status = unsafe {
             rtl_create_user_thread(
                 self.handle.into(),
-                std::ptr::null(), // lpThreadAttributes
-                create_suspended, // createSuspended
-                0,                // ZeroBits
-                stack_size_ptr,   // MaximumStackSize
-                stack_size_ptr,   // CommittedStackSize (같은 값 사용)
+                std::ptr::null(),     // lpThreadAttributes
+                create_suspended,     // createSuspended
+                0,                    // ZeroBits
+                std::ptr::null_mut(), // MaximumStackSize (기본 예약 크기)
+                committed_stack_size_ptr, // CommittedStackSize
                 start_address as usize,
                 parameter as usize,
                 &mut thread_handle,
@@ -230,7 +233,7 @@ impl ProcessHandle {
 
         let ied: IMAGE_EXPORT_DIRECTORY =
             self.reader.read(module_base + idd.VirtualAddress as u64)?;
-        if ied.NumberOfNames == 0 || ied.NumberOfNames > 10000 {
+        if ied.NumberOfNames == 0 || ied.NumberOfNames > 100_000 {
             return Err(YapiError::Memory(MemoryError::OperationFailed {
                 operation: "get_proc_address: invalid number of names".into(),
             }));
@@ -242,18 +245,29 @@ impl ProcessHandle {
         )?;
 
         for i in 0..ied.NumberOfNames {
-            let func: Vec<u8> = self
+            // 개별 이름/서수 읽기 실패는 건너뛰고 계속 탐색한다 (C++ 구현과 동일)
+            let func: Vec<u8> = match self
                 .reader
-                .read_array(module_base + name_table[i as usize] as u64, func_name.len())?;
+                .read_array(module_base + name_table[i as usize] as u64, func_name.len())
+            {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
 
             if func == func_name.as_bytes() {
-                let ord: u16 = self
-                    .reader
-                    .read(module_base + ied.AddressOfNameOrdinals as u64 + i as u64 * 2)?;
+                let ord: u16 = match self.reader.read(
+                    module_base + ied.AddressOfNameOrdinals as u64 + i as u64 * 2,
+                ) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
 
-                let rva: u32 = self
-                    .reader
-                    .read(module_base + ied.AddressOfFunctions as u64 + ord as u64 * 4)?;
+                let rva: u32 = match self.reader.read(
+                    module_base + ied.AddressOfFunctions as u64 + ord as u64 * 4,
+                ) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
 
                 return Ok(module_base + (rva as u64));
             }

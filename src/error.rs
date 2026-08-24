@@ -55,10 +55,6 @@ pub enum ProcessError {
     #[error("Function not found: {name} in module {module}")]
     FunctionNotFound { name: String, module: String },
 
-    /// Access denied to process
-    #[error("Access denied to process {pid}")]
-    AccessDenied { pid: u32 },
-
     #[error("{operation} failed")]
     OperationFailed { operation: &'static str },
 }
@@ -73,32 +69,6 @@ pub enum ThreadError {
     /// Thread operation timed out
     #[error("Thread operation timed out after {ms}ms")]
     TimeoutError { ms: u32 },
-}
-
-// Helper functions for common error cases
-impl YapiError {
-    pub fn memory_read_failed(address: u64, size: usize) -> Self {
-        Self::Memory(MemoryError::ReadFailed { address, size })
-    }
-
-    pub fn memory_write_failed(address: u64, size: usize) -> Self {
-        Self::Memory(MemoryError::WriteFailed { address, size })
-    }
-
-    pub fn module_not_found(name: impl Into<String>) -> Self {
-        Self::Process(ProcessError::ModuleNotFound { name: name.into() })
-    }
-
-    pub fn function_not_found(name: impl Into<String>, module: impl Into<String>) -> Self {
-        Self::Process(ProcessError::FunctionNotFound {
-            name: name.into(),
-            module: module.into(),
-        })
-    }
-
-    pub fn thread_timeout(ms: u32) -> Self {
-        Self::Thread(ThreadError::TimeoutError { ms })
-    }
 }
 
 impl From<MemoryError> for YapiError {
@@ -116,12 +86,5 @@ impl From<ProcessError> for YapiError {
 impl From<ThreadError> for YapiError {
     fn from(err: ThreadError) -> Self {
         Self::Thread(err)
-    }
-}
-
-//&str 트레이트
-impl From<&str> for YapiError {
-    fn from(s: &str) -> Self {
-        Self::Custom(s.to_string())
     }
 }

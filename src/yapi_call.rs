@@ -47,6 +47,7 @@ pub struct YAPICall<R = u64> {
     pub dw64_ret: bool,
     pub timeout: Option<Duration>,
     pub yapi_arch: YapiArch,
+    shell_code_arg_count: Option<usize>,
     pub _phantom: PhantomData<R>,
 }
 
@@ -54,18 +55,6 @@ impl<R> YAPICall<R>
 where
     R: Copy + 'static + Default + std::fmt::Debug,
 {
-    pub fn set_target_proc_arch(&mut self, target_proc_arch: Architecture) {
-        self.yapi_arch.target_proc_arch = target_proc_arch;
-    }
-
-    pub fn set_host_arch(&mut self, host_arch: Architecture) {
-        self.yapi_arch.host_arch = host_arch;
-    }
-
-    pub fn set_func_arch(&mut self, func_arch: Architecture) {
-        self.yapi_arch.func_arch = func_arch;
-    }
-
     /// is_64bit_func is only use when target_process is 32bit and function is 64bit
     pub fn new(
         target_process: HANDLE,
@@ -83,12 +72,14 @@ where
             }
         };
 
-        // 프로세스 아키텍처 감지
+        // 프로세스 아키텍처 감지 (IsWow64Process 실패는 오류로 처리)
         let target_proc_arch = unsafe {
             let mut is_wow64 = FALSE;
-            match IsWow64Process(target_process, &mut is_wow64) {
-                Ok(_) if host_arch == X64 && is_wow64.as_bool() => X86,
-                _ => host_arch,
+            IsWow64Process(target_process, &mut is_wow64).map_err(YapiError::Windows)?;
+            if host_arch == X64 && is_wow64.as_bool() {
+                X86
+            } else {
+                host_arch
             }
         };
 
@@ -119,13 +110,22 @@ where
             }));
         }
 
+        // 32비트 호스트에서 함수 주소가 4GB를 넘으면 패닉 대신 오류를 반환한다
+        #[cfg(target_arch = "x86")]
+        let function_address = u32::try_from(function_address).map_err(|_| {
+            YapiError::Custom(format!(
+                "function address 0x{function_address:X} exceeds 4GB on a 32-bit host"
+            ))
+        })?;
+
         Ok(Self {
             target_process_handle,
             shell_code_memory: None,
+            shell_code_arg_count: None,
             #[cfg(target_arch = "x86_64")]
             function_address,
             #[cfg(target_arch = "x86")]
-            function_address: function_address.try_into().unwrap(),
+            function_address,
             dw64_ret: false,
             timeout: Some(Duration::from_secs(5)),
             yapi_arch,
@@ -142,7 +142,7 @@ where
 
         unsafe {
             // 쉘코드 초기화
-            self.init_shell_code(params.len() as u8)?;
+            self.init_shell_code(params.len())?;
 
             // 3. 파라미터 버퍼 준비
             let mut param_buffer = self.prepare_params(params)?;
@@ -202,169 +202,72 @@ where
         #[cfg(target_arch = "x86_64")]
         let shell_code_addr = self.shell_code_memory.as_ref().unwrap().address().as_ptr() as u64;
 
-        let (thread_handle, mut bridge_code_mem) = match self.yapi_arch.host_arch {
-            Architecture::X86 => {
-                match (self.yapi_arch.target_proc_arch, self.yapi_arch.func_arch) {
-                    // 호스트가 32비트이고, 타깃 프로세스가 32비트, 함수가 32비트인 경우, 쉘코드도 32비트.
-                    (Architecture::X86, Architecture::X86) => {
-                        #[cfg(debug_assertions)]
-                        println!("host is 32bit func is 32");
-                        let handle = unsafe {
-                            self.target_process_handle.create_thread(
-                                false,
-                                None,
-                                self.shell_code_memory.as_ref().unwrap().address().as_ptr()
-                                    as u64,
-                                param_address as u64,
-                            )
-                        }?;
-                        (handle, None)
-                    }
-                    //WOW64(32비트) 호스트에서 64비트 타겟 프로세스의 64비트 API를 호출할 때
-                    (Architecture::X64, Architecture::X64) => {
-                        #[cfg(debug_assertions)]
-                        println!("host is wow64 func is 64");
+        // 64비트 함수는 64비트 delegator 쉘코드를 직접 시작 주소로 사용한다.
+        // 타깃이 wow64(x86) 프로세스여도 스레드는 지정된 64비트 시작 주소를
+        // 64비트 모드로 실행하므로 별도 브릿지가 필요 없다. (C++ 원본도 delegator를 직접 사용)
+        let thread_handle = match (self.yapi_arch.func_arch, self.yapi_arch.target_proc_arch) {
+            (Architecture::X64, _) => {
+                #[cfg(target_arch = "x86")]
+                {
+                    return Err(YapiError::Custom(
+                        "calling a 64-bit function requires a 64-bit injector process".to_string(),
+                    ));
+                }
 
-                        pub const X64_CALL: &[u8] = &[
-                            0x55, 0x8b, 0xec, 0x8b, 0x4d, 0x10, 0x8d, 0x55, 0x14, 0x83, 0xec, 0x40,
-                            0x53, 0x56, 0x57, 0x85, 0xc9, 0x7e, 0x15, 0x8b, 0x45, 0x14, 0x8d, 0x55,
-                            0x1c, 0x49, 0x89, 0x45, 0xf0, 0x8b, 0x45, 0x18, 0x89, 0x4d, 0x10, 0x89,
-                            0x45, 0xf4, 0xeb, 0x08, 0x0f, 0x57, 0xc0, 0x66, 0x0f, 0x13, 0x45, 0xf0,
-                            0x85, 0xc9, 0x7e, 0x15, 0x49, 0x83, 0xc2, 0x08, 0x89, 0x4d, 0x10, 0x8b,
-                            0x42, 0xf8, 0x89, 0x45, 0xe8, 0x8b, 0x42, 0xfc, 0x89, 0x45, 0xec, 0xeb,
-                            0x08, 0x0f, 0x57, 0xc0, 0x66, 0x0f, 0x13, 0x45, 0xe8, 0x85, 0xc9, 0x7e,
-                            0x15, 0x49, 0x83, 0xc2, 0x08, 0x89, 0x4d, 0x10, 0x8b, 0x42, 0xf8, 0x89,
-                            0x45, 0xe0, 0x8b, 0x42, 0xfc, 0x89, 0x45, 0xe4, 0xeb, 0x08, 0x0f, 0x57,
-                            0xc0, 0x66, 0x0f, 0x13, 0x45, 0xe0, 0x85, 0xc9, 0x7e, 0x15, 0x49, 0x83,
-                            0xc2, 0x08, 0x89, 0x4d, 0x10, 0x8b, 0x42, 0xf8, 0x89, 0x45, 0xd8, 0x8b,
-                            0x42, 0xfc, 0x89, 0x45, 0xdc, 0xeb, 0x08, 0x0f, 0x57, 0xc0, 0x66, 0x0f,
-                            0x13, 0x45, 0xd8, 0x8b, 0xc2, 0xc7, 0x45, 0xfc, 0x00, 0x00, 0x00, 0x00,
-                            0x99, 0x0f, 0x57, 0xc0, 0x89, 0x45, 0xc0, 0x8b, 0xc1, 0x89, 0x55, 0xc4,
-                            0x99, 0x66, 0x0f, 0x13, 0x45, 0xc8, 0x89, 0x45, 0xd0, 0x89, 0x55, 0xd4,
-                            0xc7, 0x45, 0xf8, 0x00, 0x00, 0x00, 0x00, 0x66, 0x8c, 0x65, 0xf8, 0xb8,
-                            0x2b, 0x00, 0x00, 0x00, 0x66, 0x8e, 0xe0, 0x89, 0x65, 0xfc, 0x83, 0xe4,
-                            0xf0, 0x6a, 0x33, 0xe8, 0x00, 0x00, 0x00, 0x00, 0x83, 0x04, 0x24, 0x05,
-                            0xcb, 0x48, 0x8b, 0x4d, 0xf0, 0x48, 0x8b, 0x55, 0xe8, 0xff, 0x75, 0xe0,
-                            0x49, 0x58, 0xff, 0x75, 0xd8, 0x49, 0x59, 0x48, 0x8b, 0x45, 0xd0, 0xa8,
-                            0x01, 0x75, 0x03, 0x83, 0xec, 0x08, 0x57, 0x48, 0x8b, 0x7d, 0xc0, 0x48,
-                            0x85, 0xc0, 0x74, 0x16, 0x48, 0x8d, 0x7c, 0xc7, 0xf8, 0x48, 0x85, 0xc0,
-                            0x74, 0x0c, 0xff, 0x37, 0x48, 0x83, 0xef, 0x08, 0x48, 0x83, 0xe8, 0x01,
-                            0xeb, 0xef, 0x48, 0x83, 0xec, 0x20, 0xff, 0x55, 0x08, 0x48, 0x8b, 0x4d,
-                            0xd0, 0x48, 0x8d, 0x64, 0xcc, 0x20, 0x5f, 0x48, 0x89, 0x45, 0xc8, 0xe8,
-                            0x00, 0x00, 0x00, 0x00, 0xc7, 0x44, 0x24, 0x04, 0x23, 0x00, 0x00, 0x00,
-                            0x83, 0x04, 0x24, 0x0d, 0xcb, 0x66, 0x8c, 0xd8, 0x66, 0x8e, 0xd0, 0x8b,
-                            0x65, 0xfc, 0x66, 0x8b, 0x45, 0xf8, 0x66, 0x8e, 0xe0, 0x8b, 0x45, 0xc8,
-                            0x8b, 0x55, 0xcc, 0x5f, 0x5e, 0x5b, 0x8b, 0xe5, 0x5d, 0xc3,
-                        ];
+                #[cfg(target_arch = "x86_64")]
+                unsafe {
+                    #[cfg(debug_assertions)]
+                    println!("host is 64bit func is 64");
+                    println!("shell_code_addr: 0x{:X}", shell_code_addr);
 
-                        let bridge_code_mem = ProcessWriter::new(
-                            self.target_process_handle.as_raw(),
-                            &X64_CALL,
-                            PAGE_EXECUTE_READWRITE,
-                        )?;
-                        let handle = unsafe {
-                            self.target_process_handle.create_thread(
-                                false,
-                                None,
-                                bridge_code_mem.address().as_ptr() as u64,
-                                param_address as u64,
-                            )
-                        }?;
-                        (handle, Some(bridge_code_mem))
-                    }
-                    _ => {
-                        return Err(YapiError::Custom(
-                            "32-bit host cannot call 64-bit function".to_string(),
-                        ));
-                    }
+                    CreateRemoteThread(
+                        self.target_process_handle.as_raw(),
+                        None,
+                        0,
+                        Some(std::mem::transmute(shell_code_addr)),
+                        Some(param_address),
+                        0,
+                        None,
+                    )?
                 }
             }
-            #[cfg(target_arch = "x86_64")]
-            Architecture::X64 => {
-                match (self.yapi_arch.target_proc_arch, self.yapi_arch.func_arch) {
-                    // 호스트가 64비트이고, 타깃 프로세스가 32비트, 함수가 32비트인 경우, 쉘코드도 32비트.
-                    (Architecture::X86, Architecture::X86) => {
-                        #[cfg(debug_assertions)]
-                        println!("host is 64bit func is wow32");
-                        let handle = unsafe {
-                            CreateRemoteThread(
-                                self.target_process_handle.as_raw(),
-                                None,
-                                0,
-                                Some(std::mem::transmute(shell_code_addr)),
-                                Some(param_address),
-                                0,
-                                None,
-                            )
-                        }?;
-                        (handle, None)
-                    }
-                    // 호스트가 64비트이고, 타깃 프로세스가 32비트(wow64), 함수가 64비트인 경우, 쉘코드도 32비트. - 브릿지 코드 사용.
-                    (Architecture::X86, Architecture::X64) => {
-                        #[cfg(debug_assertions)]
-                        println!("host is 64bit target is wow64, func is 64");
-
-                        // 64비트 호스트에서
-                        // 32비트 프로세스에
-                        // 64비트 API 호출을 시도할 때만 사용됩니다
-                        pub const K_TMPL_X64_TO_X86: &[u8] = &[
-                            0x48, 0x89, 0x4c, 0x24, 0x08, 0x48, 0x83, 0xec, 0x28, 0x48, 0x8b, 0x44,
-                            0x24, 0x30, 0x8b, 0x48, 0x08, 0x48, 0x8b, 0x44, 0x24, 0x30, 0x6a, 0x33,
-                            0xe8, 0x00, 0x00, 0x00, 0x00, 0x83, 0x04, 0x24, 0x05, 0xcb, 0xff, 0xd0,
-                            0xe8, 0x00, 0x00, 0x00, 0x00, 0xc7, 0x44, 0x24, 0x04, 0x23, 0x00, 0x00,
-                            0x00, 0x83, 0x04, 0x24, 0x0d, 0xcb, 0x48, 0x83, 0xc4, 0x28, 0xc3,
-                        ];
-
-                        let bridge_code_mem = ProcessWriter::new(
-                            self.target_process_handle.as_raw(),
-                            &K_TMPL_X64_TO_X86,
-                            PAGE_EXECUTE_READWRITE,
-                        )?;
-                        let handle = unsafe {
-                            CreateRemoteThread(
-                                self.target_process_handle.as_raw(),
-                                None,
-                                0,
-                                Some(std::mem::transmute(bridge_code_mem.address().as_ptr())),
-                                Some(param_address),
-                                0,
-                                None,
-                            )
-                        }?;
-                        (handle, Some(bridge_code_mem))
-                    }
-
-                    // 호스트가 64비트이고, 타깃 프로세스가 64비트, 함수도 64비트인 경우, 쉘코드도 64비트.
-                    (Architecture::X64, Architecture::X64) => {
-                        #[cfg(debug_assertions)]
-                        println!("host is 64bit func is 64");
-                        println!("shell_code_addr: 0x{:X}", shell_code_addr);
-
-                        let handle = unsafe {
-                            CreateRemoteThread(
-                                self.target_process_handle.as_raw(),
-                                None,
-                                0,
-                                Some(std::mem::transmute(shell_code_addr)),
-                                Some(param_address),
-                                0,
-                                None,
-                            )
-                        }?;
-                        (handle, None)
-                    }
-                    // 호스트가 64비트이고, 타깃 프로세스가 64비트, 함수가 32비트인 경우, 에러.
-                    (Architecture::X64, Architecture::X86) => {
-                        return Err(YapiError::Custom(
-                            "64-bit host cannot call 32-bit function in 64-bit process".to_string(),
-                        ));
-                    }
-                }
+            // 32비트 함수는 64비트 프로세스에서 실행할 수 없다
+            (Architecture::X86, Architecture::X64) => {
+                return Err(YapiError::Custom(
+                    "cannot call a 32-bit function in a 64-bit process".to_string(),
+                ));
             }
+            // 32비트 함수: 타깃이 32비트(wow64 포함) 프로세스인 경우
+            (Architecture::X86, Architecture::X86) => {
+                #[cfg(target_arch = "x86_64")]
+                unsafe {
+                    #[cfg(debug_assertions)]
+                    println!("host is 64bit func is wow32");
 
-            #[cfg(target_arch = "x86")]
-            Architecture::X64 => {
-                todo!()
+                    CreateRemoteThread(
+                        self.target_process_handle.as_raw(),
+                        None,
+                        0,
+                        Some(std::mem::transmute(shell_code_addr)),
+                        Some(param_address),
+                        0,
+                        None,
+                    )?
+                }
+
+                // 32비트 호스트는 RtlCreateUserThread로 스레드를 생성한다
+                #[cfg(target_arch = "x86")]
+                unsafe {
+                    #[cfg(debug_assertions)]
+                    println!("host is 32bit func is 32");
+
+                    self.target_process_handle.create_thread(
+                        false,
+                        None,
+                        self.shell_code_memory.as_ref().unwrap().address().as_ptr() as u64,
+                        param_address as u64,
+                    )?
+                }
             }
         };
 
@@ -373,19 +276,23 @@ where
             .map(|d| d.as_millis() as u32)
             .unwrap_or(INFINITE);
 
+        // 성공/실패 모든 경로에서 스레드 핸들이 닫히도록 보장한다
+        let _thread_guard = scopeguard::guard(thread_handle, |h| {
+            let _ = unsafe { CloseHandle(h) };
+        });
+
         if unsafe { WaitForSingleObject(thread_handle, timeout_ms) } != WAIT_OBJECT_0 {
-            if let Some(bridge) = bridge_code_mem.as_mut() {
-                bridge.dont_free();
+            // 타임아웃 시 원격 스레드가 아직 메모리를 사용 중일 수 있으므로 해제를 보류한다
+            if let Some(sc) = self.shell_code_memory.as_mut() {
+                sc.dont_free();
             }
-            self.shell_code_memory.as_mut().map(|sc| sc.dont_free());
-            unsafe { CloseHandle(thread_handle) }?;
             return Err(YapiError::Thread(ThreadError::TimeoutError {
                 ms: timeout_ms,
             }));
         }
 
         let result = if self.yapi_arch.func_arch == Architecture::X86 || !self.dw64_ret {
-            // 32비트 또는 dw64_ret이 false인 경우
+            // 32비트 결과 또는 dw64_ret이 false인 경우: 스레드 종료 코드 사용
             #[cfg(debug_assertions)]
             println!("32bit or dw64_ret is false");
 
@@ -393,7 +300,7 @@ where
             unsafe { GetExitCodeThread(thread_handle, &mut exit_code) }?;
             result_from_thread_exit_code(exit_code)?
         } else {
-            // 64비트이고 dw64_ret이 true인 경우
+            // 64비트 결과이고 dw64_ret이 true인 경우: 파라미터 버퍼에서 값을 읽는다
             #[cfg(debug_assertions)]
             println!("64bit and dw64_ret is true");
 
@@ -410,26 +317,25 @@ where
             result
         };
 
-        unsafe { CloseHandle(thread_handle) }?;
         Ok(result)
     }
 
-    fn init_shell_code(&mut self, arg_count: u8) -> Result<()> {
-        // 인자 개수 제한 체크
+    fn init_shell_code(&mut self, arg_count: usize) -> Result<()> {
+        // 인자 개수 제한 체크 (u8 변환 절단 전에 검사)
         if arg_count > 6 {
             return Err(YapiError::Custom(
                 "Maximum 6 parameters supported".to_string(),
             ));
         }
 
-        // 이미 쉘코드가 있다면 재사용
-        if self.shell_code_memory.is_some() {
+        // 같은 인자 개수로 이미 생성된 쉘코드가 있다면 재사용
+        if self.shell_code_arg_count == Some(arg_count) && self.shell_code_memory.is_some() {
             return Ok(());
         }
 
         // 새 쉘코드 생성
         let code: Vec<u8> = ShellCodeBuilder::new(self.yapi_arch)
-            .make_shell_code(arg_count)
+            .make_shell_code(arg_count as u8)?
             .build();
 
         #[cfg(debug_assertions)]
@@ -447,6 +353,7 @@ where
             &code,
             PAGE_EXECUTE_READWRITE, // PAGE_EXECUTE_READWRITE
         )?);
+        self.shell_code_arg_count = Some(arg_count);
 
         #[cfg(debug_assertions)]
         println!(

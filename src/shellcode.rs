@@ -1,4 +1,4 @@
-﻿use crate::{Architecture::*, VecExtension, YapiArch};
+﻿use crate::{Architecture::*, Result, VecExtension, YapiArch, YapiError};
 
 // Constants for x64 register loading patterns
 pub const LOAD_RCX: [u8; 4] = [0x48, 0x8b, 0x49, 0x10]; // First param: mov rcx, [rbx+0x10]
@@ -105,12 +105,6 @@ impl ShellCodeBuilder {
     }
 
     fn make_x86_shell_code(&mut self, cnt: u8) {
-        // 오버플로우 체크 추가
-        if cnt > 36 {
-            // 255/7 ≈ 36
-            return;
-        }
-
         self.shell_code[9] += cnt * 7;
 
         self.shell_code[16] += (((1 - cnt as i8) % 3 + 3) % 3) as u8;
@@ -128,12 +122,26 @@ impl ShellCodeBuilder {
         }
     }
 
-    pub fn make_shell_code(&mut self, cnt: u8) -> &mut Self {
+    pub fn make_shell_code(&mut self, cnt: u8) -> Result<&mut Self> {
         match self.yapi_arch.func_arch {
-            X64 => self.make_x64_shell_code(cnt),
-            X86 => self.make_x86_shell_code(cnt),
+            X64 => {
+                if cnt > 6 {
+                    return Err(YapiError::Custom(
+                        "Maximum 6 parameters supported for 64-bit functions".to_string(),
+                    ));
+                }
+                self.make_x64_shell_code(cnt);
+            }
+            X86 => {
+                if cnt > 36 {
+                    return Err(YapiError::Custom(
+                        "Maximum 36 parameters supported for 32-bit functions".to_string(),
+                    ));
+                }
+                self.make_x86_shell_code(cnt);
+            }
         }
-        self
+        Ok(self)
     }
 
     pub fn build(&self) -> Vec<u8> {
@@ -153,12 +161,53 @@ impl ShellCodeBuilder {
         }
         println!("Building shellcode: {} bytes", self.shell_code.len());
     }
+}
 
-    pub fn dump_code(&self) -> String {
-        self.shell_code
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect::<Vec<_>>()
-            .join(" ")
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Architecture;
+
+    fn builder(func_arch: Architecture) -> ShellCodeBuilder {
+        ShellCodeBuilder::new(YapiArch {
+            host_arch: Architecture::X64,
+            target_proc_arch: func_arch,
+            func_arch,
+        })
+    }
+
+    #[test]
+    fn rejects_more_than_six_args_for_x64() {
+        assert!(builder(Architecture::X64).make_shell_code(7).is_err());
+    }
+
+    #[test]
+    fn rejects_too_many_args_for_x86() {
+        assert!(builder(Architecture::X86).make_shell_code(37).is_err());
+    }
+
+    #[test]
+    fn generates_expected_lengths_for_x64() {
+        // 기본 51바이트 + 인자 개수에 따른 삽입 크기
+        let expected = [51, 55, 59, 63, 67, 76, 85];
+        for (cnt, len) in expected.iter().enumerate() {
+            let code = builder(Architecture::X64)
+                .make_shell_code(cnt as u8)
+                .unwrap()
+                .build();
+            assert_eq!(code.len(), *len, "cnt={cnt}");
+        }
+    }
+
+    #[test]
+    fn generates_expected_length_for_x86() {
+        // 기본 36바이트 + 인자 개수 x 7바이트
+        for cnt in 0..=6u8 {
+            let code = builder(Architecture::X86)
+                .make_shell_code(cnt)
+                .unwrap()
+                .build();
+            assert_eq!(code.len(), 36 + cnt as usize * 7, "cnt={cnt}");
+        }
     }
 }

@@ -163,7 +163,6 @@ impl MemoryReader for Process64Reader {
     }
 }
 
-// #[cfg(target_arch = "x86_64")]
 pub unsafe fn nt_wow64_read_virtual_memory64(
     process: ProcessHandleWrapper,
     base_address: u64,
@@ -171,6 +170,16 @@ pub unsafe fn nt_wow64_read_virtual_memory64(
     buffer_size: u64,
     bytes_read: *mut u64,
 ) -> Result<NTSTATUS> {
+    // 32비트 호스트에서는 4GB를 넘는 주소를 표현할 수 없다.
+    // 조용한 절단(잘못된 주소 읽기) 대신 오류를 반환한다.
+    #[cfg(target_arch = "x86")]
+    if base_address > u32::MAX as u64 {
+        return Err(YapiError::Memory(MemoryError::ReadFailed {
+            address: base_address,
+            size: buffer_size as usize,
+        }));
+    }
+
     let mut bytes_read_32 = 0usize;
 
     unsafe {
@@ -187,41 +196,3 @@ pub unsafe fn nt_wow64_read_virtual_memory64(
     }
     Ok(NTSTATUS(0))
 }
-
-// #[cfg(target_arch = "x86")]
-// pub unsafe fn nt_wow64_read_virtual_memory64(
-//     process: ProcessHandleWrapper,
-//     base_address: u64,
-//     buffer: *mut c_void,
-//     buffer_size: u64,
-//     bytes_read: *mut u64,
-// ) -> Result<NTSTATUS> {
-//     use std::sync::{LazyLock, Mutex};
-//     use windows::Win32::System::LibraryLoader::GetProcAddress;
-
-//     static NT_WOW64_READ_VIRTUAL_MEMORY: LazyLock<Mutex<Option<NtWow64ReadVirtualMemory>>> =
-//         LazyLock::new(|| Mutex::new(None));
-
-//     let func = {
-//         let mut guard = NT_WOW64_READ_VIRTUAL_MEMORY.lock().map_err(|_| {
-//             YapiError::Memory(MemoryError::OperationFailed {
-//                 operation: "Lock acquisition failed",
-//             })
-//         })?;
-
-//         if guard.is_none() {
-//             let ntdll = super::get_ntdll64()?;
-//             let func = GetProcAddress(
-//                 ntdll,
-//                 windows::core::PCSTR(b"NtWow64ReadVirtualMemory\0".as_ptr()),
-//             );
-//             *guard = func.map(|f| unsafe { std::mem::transmute(f) });
-//         }
-
-//         guard.ok_or(YapiError::Memory(MemoryError::OperationFailed {
-//             operation: "Function not found",
-//         }))?
-//     };
-
-//     Ok(func(process, base_address, buffer, buffer_size, bytes_read))
-// }

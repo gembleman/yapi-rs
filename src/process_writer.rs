@@ -6,7 +6,7 @@ use windows::Win32::{
     System::{
         Diagnostics::Debug::WriteProcessMemory,
         Memory::{
-            MEM_COMMIT, MEM_DECOMMIT, MEM_RESERVE, PAGE_PROTECTION_FLAGS, VirtualAllocEx,
+            MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_PROTECTION_FLAGS, VirtualAllocEx,
             VirtualFreeEx,
         },
     },
@@ -46,7 +46,8 @@ impl ProcessWriter {
             }
 
             if !success.is_ok() || written != size {
-                VirtualFreeEx(process, address.as_ptr(), size, MEM_DECOMMIT)?;
+                // MEM_RELEASE 사용 시 크기는 0이어야 한다
+                VirtualFreeEx(process, address.as_ptr(), 0, MEM_RELEASE)?;
                 return Err(YapiError::Memory(MemoryError::WriteFailed {
                     address: address.as_ptr() as u64,
                     size,
@@ -84,11 +85,12 @@ impl Drop for ProcessWriter {
     fn drop(&mut self) {
         if self.should_free {
             unsafe {
+                // MEM_DECOMMIT은 예약을 남겨 주소 공간이 누수되므로 MEM_RELEASE로 완전 해제한다
                 let _ = VirtualFreeEx(
                     self.process.as_raw(),
                     self.address.as_ptr(),
-                    self.size,
-                    MEM_DECOMMIT,
+                    0,
+                    MEM_RELEASE,
                 );
             }
         }

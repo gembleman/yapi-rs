@@ -25,17 +25,3 @@ fn test_process_writer() {
         assert_eq!(&read_back, &data);
     }
 }
-
-#[test]
-fn test_module_enumeration() {
-    // unsafe {
-    //     // let process = GetCurrentProcess();
-    //     // // let yapi = YAPICall::new(process, "kernel32.dll", "GetProcAddress").unwrap();
-    //     // let modules = yapi.enum_modules().unwrap();
-
-    //     // assert!(!modules.is_empty());
-    //     // assert!(modules
-    //     //     .iter()
-    //     //     .any(|m| m.name.to_lowercase() == "kernel32.dll"));
-    // }
-}
