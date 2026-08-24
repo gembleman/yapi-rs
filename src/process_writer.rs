@@ -5,8 +5,7 @@ use std::ptr::NonNull;
 use windows::Win32::{
     Foundation::HANDLE,
     System::Memory::{
-        MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_PROTECTION_FLAGS, VirtualAllocEx,
-        VirtualFreeEx,
+        MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_PROTECTION_FLAGS, VirtualAllocEx, VirtualFreeEx,
     },
 };
 
@@ -82,12 +81,7 @@ impl Drop for ProcessWriter {
         if self.should_free {
             unsafe {
                 // MEM_DECOMMIT은 예약을 남겨 주소 공간이 누수되므로 MEM_RELEASE로 완전 해제한다
-                let _ = VirtualFreeEx(
-                    self.process.as_raw(),
-                    self.address.as_ptr(),
-                    0,
-                    MEM_RELEASE,
-                );
+                let _ = VirtualFreeEx(self.process.as_raw(), self.address.as_ptr(), 0, MEM_RELEASE);
             }
         }
     }

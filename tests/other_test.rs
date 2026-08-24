@@ -144,12 +144,11 @@ fn test_call_64bit_function_in_native_x64_target() {
     use yapi::YAPICall;
 
     unsafe {
-        let snapshot =
-            windows::Win32::System::Diagnostics::ToolHelp::CreateToolhelp32Snapshot(
-                windows::Win32::System::Diagnostics::ToolHelp::TH32CS_SNAPPROCESS,
-                0,
-            )
-            .unwrap();
+        let snapshot = windows::Win32::System::Diagnostics::ToolHelp::CreateToolhelp32Snapshot(
+            windows::Win32::System::Diagnostics::ToolHelp::TH32CS_SNAPPROCESS,
+            0,
+        )
+        .unwrap();
         let _guard = scopeguard::guard(snapshot, |h| {
             let _ = CloseHandle(h);
         });
@@ -193,9 +192,8 @@ fn test_call_64bit_function_in_native_x64_target() {
             return;
         };
 
-        let mut call =
-            YAPICall::<u32>::new_ntdll_64(handle, "NtGetCurrentProcessorNumber")
-                .expect("new_ntdll_64 failed");
+        let mut call = YAPICall::<u32>::new_ntdll_64(handle, "NtGetCurrentProcessorNumber")
+            .expect("new_ntdll_64 failed");
         let r = call.call_function(&[]).expect("remote 64bit call failed");
         println!("remote processor number = {r}");
         assert!(r < 65536);

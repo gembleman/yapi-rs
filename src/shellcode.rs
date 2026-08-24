@@ -112,7 +112,7 @@ impl ShellCodeBuilder {
         let mut pos = 13;
         for i in 0..cnt {
             let mut pattern = X86_PATTERNS[i as usize % 3];
-            pattern[2] = ((cnt - i) << 2) as u8;
+            pattern[2] = (cnt - i) << 2;
             self.shell_code.insert_slice(pos, &pattern);
             pos += 7;
         }

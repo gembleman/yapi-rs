@@ -2,8 +2,10 @@ use crate::{MemoryError, YapiError, types::*};
 use std::{
     ffi::c_void,
     mem::zeroed,
-    sync::LazyLock,
+    sync::{LazyLock, Mutex},
 };
+#[cfg(target_arch = "x86_64")]
+use windows::Win32::System::Diagnostics::Debug::WriteProcessMemory;
 use windows::Win32::{
     Foundation::{HANDLE, NTSTATUS},
     System::{
@@ -11,36 +13,21 @@ use windows::Win32::{
         LibraryLoader::{GetModuleHandleW, GetProcAddress},
     },
 };
-#[cfg(target_arch = "x86_64")]
-use windows::Win32::System::Diagnostics::Debug::WriteProcessMemory;
 use windows::core::{PCSTR, w};
 
 use super::nt_success;
 
 // wow64의 NtWow64* 함수는 의사 핸들(GetCurrentProcess())을 거부하므로
-// 실제 핸들이 필요하다. 현재 프로세스의 실제 핸들을 캐싱해 둔다(0 = 실패).
-static SELF_REAL_HANDLE: LazyLock<usize> = LazyLock::new(|| {
-    unsafe {
-        let pseudo = windows::Win32::System::Threading::GetCurrentProcess();
-        let pid = windows::Win32::System::Threading::GetProcessId(pseudo);
-        windows::Win32::System::Threading::OpenProcess(
-            windows::Win32::System::Threading::PROCESS_ALL_ACCESS,
-            false,
-            pid,
-        )
-        .map(|h| h.0 as usize)
-        .unwrap_or(0)
-    }
-});
+// 실제 핸들이 필요하다. 프로세스 수명 동안 하나만 열어 두고 재사용한다.
+// 실패(None)는 기억하지 않으므로 일시적 실패 후에도 다시 시도한다.
+static SELF_REAL_HANDLE: Mutex<Option<usize>> = Mutex::new(None);
 
 /// NtWow64*/게이트 호출용으로 의사 핸들을 실제 핸들로 대체한다.
-pub(crate) unsafe fn ensure_real_handle(process: HANDLE) -> HANDLE {
-    unsafe {
-        if let Some(real) = self_real_handle_or_none(process) {
-            real
-        } else {
-            process
-        }
+pub(crate) fn ensure_real_handle(process: HANDLE) -> HANDLE {
+    if let Some(real) = self_real_handle_or_none(process) {
+        real
+    } else {
+        process
     }
 }
 
@@ -48,19 +35,29 @@ pub(crate) unsafe fn ensure_real_handle(process: HANDLE) -> HANDLE {
 fn self_real_handle_or_none(process: HANDLE) -> Option<HANDLE> {
     let is_pseudo = process.0.is_null()
         || unsafe { process == windows::Win32::System::Threading::GetCurrentProcess() };
-    if is_pseudo {
-        self_real_handle()
-    } else {
-        None
-    }
+    if is_pseudo { self_real_handle() } else { None }
 }
 
-/// 현재 프로세스의 실제 핸들(전역 캐시). 캐싱 실패 시 None.
+/// 현재 프로세스의 실제 핸들(전역 캐시). 아직 열지 않았거나 이전 시도가
+/// 실패했으면 OpenProcess를 다시 시도한다.
 ///
-/// 정적 캐시이므로 인스턴스마다 OpenProcess를 다시 열지 않는다(핸들 누수 방지).
+/// 정적 캐시이므로 인스턴스마다 핸들을 새로 열지 않는다(핸들 누수 방지).
 pub(crate) fn self_real_handle() -> Option<HANDLE> {
-    let cached = *SELF_REAL_HANDLE;
-    (cached != 0).then(|| HANDLE(cached as *mut core::ffi::c_void))
+    let mut cached = SELF_REAL_HANDLE.lock().unwrap_or_else(|e| e.into_inner());
+    if cached.is_none() {
+        *cached = unsafe {
+            let pseudo = windows::Win32::System::Threading::GetCurrentProcess();
+            let pid = windows::Win32::System::Threading::GetProcessId(pseudo);
+            windows::Win32::System::Threading::OpenProcess(
+                windows::Win32::System::Threading::PROCESS_ALL_ACCESS,
+                false,
+                pid,
+            )
+            .ok()
+            .map(|h| h.0 as usize)
+        };
+    }
+    cached.map(|v| HANDLE(v as *mut core::ffi::c_void))
 }
 
 // Memory reading trait with additional helper method
@@ -130,7 +127,7 @@ impl MemoryReader for Process32Reader {
                 size,
                 Some(&mut bytes_read),
             )
-            .map_err(|e| YapiError::Windows(e))?;
+            .map_err(YapiError::Windows)?;
 
             Self::validate_read(bytes_read, size, address)?;
             Ok(buffer)
@@ -288,6 +285,10 @@ const PROCESS_BASIC_INFORMATION_CLASS: u32 = 0; // ProcessBasicInformation
 ///
 /// - x64 호스트: NtQueryInformationProcess(ProcessBasicInformation)
 /// - wow64 호스트: NtWow64QueryInformationProcess64(ProcessBasicInformation)
+///
+/// # Safety
+///
+/// `process`는 PROCESS_QUERY_INFORMATION 권한을 가진 유효한 프로세스 핸들이어야 한다.
 pub unsafe fn nt_wow64_query_information_process64(
     process: HANDLE,
 ) -> Result<ProcessBasicInformation64> {
@@ -322,6 +323,11 @@ pub unsafe fn nt_wow64_query_information_process64(
 ///
 /// - x64 호스트: ReadProcessMemory로 충분하다
 /// - wow64 호스트: ntdll의 NtWow64ReadVirtualMemory64로 4GB 이상 주소도 읽는다
+///
+/// # Safety
+///
+/// `process`는 PROCESS_VM_READ 권한을 가진 핸들이어야 하고, `buffer`는
+/// `buffer_size`바이트 이상 쓸 수 있는 유효한 메모리여야 한다.
 pub unsafe fn nt_wow64_read_virtual_memory64(
     process: ProcessHandleWrapper,
     base_address: u64,
@@ -360,8 +366,8 @@ pub unsafe fn nt_wow64_read_virtual_memory64(
                 Some(&mut bytes_read_32),
             )
             .map_err(YapiError::Windows)?;
+            *bytes_read = bytes_read_32 as u64;
         }
-        *bytes_read = bytes_read_32 as u64;
     }
 
     Ok(())
@@ -372,6 +378,11 @@ pub unsafe fn nt_wow64_read_virtual_memory64(
 /// - x64 호스트: WriteProcessMemory로 충분하다
 /// - wow64 호스트: ntdll의 NtWow64WriteVirtualMemory64로 4GB 이상 주소에도 쓴다
 ///   (헤븐즈 게이트 없이 호출 가능한 실제 export다)
+///
+/// # Safety
+///
+/// `process`는 PROCESS_VM_WRITE 권한을 가진 핸들이어야 하고, `buffer`는
+/// `buffer_size`바이트 이상 읽을 수 있는 유효한 메모리여야 한다.
 pub unsafe fn nt_wow64_write_virtual_memory64(
     process: ProcessHandleWrapper,
     base_address: u64,
@@ -389,8 +400,7 @@ pub unsafe fn nt_wow64_write_virtual_memory64(
         };
 
         let process = ensure_real_handle(process.into());
-        let status =
-            unsafe { func(process, base_address, buffer, buffer_size, bytes_written) };
+        let status = unsafe { func(process, base_address, buffer, buffer_size, bytes_written) };
         if !nt_success(status) {
             return Err(YapiError::Memory(MemoryError::WriteFailed {
                 address: base_address,
@@ -411,8 +421,8 @@ pub unsafe fn nt_wow64_write_virtual_memory64(
                 Some(&mut bytes_written_32),
             )
             .map_err(YapiError::Windows)?;
+            *bytes_written = bytes_written_32 as u64;
         }
-        *bytes_written = bytes_written_32 as u64;
     }
 
     Ok(())

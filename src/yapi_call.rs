@@ -212,10 +212,9 @@ where
 
             #[cfg(debug_assertions)]
             {
-                // 파라미터 버퍼 상세 덤프
+                // 파라미터 버퍼 상세 덤프 (진단용 — 읽기 실패가 호출을 중단시키지 않는다)
                 println!("Param Buffer Details:");
 
-                // 안전한 메모리 읽기 방법
                 let buffer_bytes = {
                     let mut buffer = vec![0u8; param_buffer.size];
                     let mut bytes_read = 0;
@@ -226,21 +225,23 @@ where
                         buffer.as_mut_ptr() as *mut c_void,
                         buffer.len(),
                         Some(&mut bytes_read),
-                    )?;
-
-                    buffer
+                    )
+                    .map(|_| buffer)
+                    .unwrap_or_default()
                 };
 
-                println!(
-                    "Raw Buffer (bytes): {}",
-                    buffer_bytes
-                        .iter()
-                        .map(|b| format!("0x{:02x}", b))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                );
-                // 추가적으로 읽은 바이트 수도 출력하면 디버깅에 도움이 됩니다
-                println!("Bytes read from param buffer: {}", buffer_bytes.len());
+                if buffer_bytes.is_empty() {
+                    println!("Param buffer dump unavailable (read failed)");
+                } else {
+                    println!(
+                        "Raw Buffer (bytes): {}",
+                        buffer_bytes
+                            .iter()
+                            .map(|b| format!("0x{:02x}", b))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    );
+                }
 
                 // 쉘코드 메모리 정보 출력
                 if let Some(shell_code_mem) = &self.shell_code_memory {
@@ -253,15 +254,15 @@ where
             }
 
             // 4. 원격 스레드 실행
-            let result = self.execute_remote_thread(param_buffer.address().as_ptr());
-            if result.is_err() {
-                param_buffer.dont_free();
-            }
-            result
+            // 파라미터 버퍼의 해제 시점은 execute_remote_thread가 결정한다:
+            //   - 스레드가 시작되기 전 실패 → 즉시 해제(버림)
+            //   - 스레드 시작 후 실패(타임아웃/대기 실패) → 실행 중일 수 있으므로 보류
+            self.execute_remote_thread(&mut param_buffer)
         }
     }
 
-    unsafe fn execute_remote_thread(&mut self, param_address: *mut c_void) -> Result<R> {
+    unsafe fn execute_remote_thread(&mut self, param_buffer: &mut ProcessWriter) -> Result<R> {
+        let param_address = param_buffer.address().as_ptr();
         // 64비트 함수는 64비트 delegator 쉘코드를 직접 시작 주소로 사용한다.
         //
         // 실증된 제약: wow64 대상 프로세스의 스레드는 생성 방식(네이티브/게이트 불문)과
@@ -295,7 +296,10 @@ where
                         self.target_process_handle.as_raw(),
                         None,
                         0,
-                        Some(std::mem::transmute(start_address)),
+                        Some(std::mem::transmute::<
+                            u64,
+                            unsafe extern "system" fn(*mut c_void) -> u32,
+                        >(start_address)),
                         Some(param_address),
                         0,
                         None,
@@ -332,7 +336,10 @@ where
                         self.target_process_handle.as_raw(),
                         None,
                         0,
-                        Some(std::mem::transmute(start_address)),
+                        Some(std::mem::transmute::<
+                            u64,
+                            unsafe extern "system" fn(*mut c_void) -> u32,
+                        >(start_address)),
                         Some(param_address),
                         0,
                         None,
@@ -342,8 +349,12 @@ where
                 // 32비트 호스트는 RtlCreateUserThread로 스레드를 생성한다
                 #[cfg(target_arch = "x86")]
                 {
-                    self.target_process_handle
-                        .create_thread(false, None, start_address, param_address as u64)?
+                    self.target_process_handle.create_thread(
+                        false,
+                        None,
+                        start_address,
+                        param_address as u64,
+                    )?
                 }
             },
         };
@@ -361,7 +372,9 @@ where
 
         let wait = unsafe { WaitForSingleObject(thread_handle, timeout_ms) };
         if wait != WAIT_OBJECT_0 {
-            // 원격 스레드가 아직 메모리를 사용 중일 수 있으므로 해제를 보류한다
+            // 스레드가 시작된 뒤의 실패다. 원격 스레드가 아직 파라미터 버퍼와
+            // 쉘코드를 사용 중일 수 있으므로 해제를 모두 보류한다.
+            param_buffer.dont_free();
             if let Some(sc) = self.shell_code_memory.as_mut() {
                 sc.dont_free();
             }
@@ -386,7 +399,16 @@ where
             unsafe { GetExitCodeThread(thread_handle, &mut exit_code) }?;
             result_from_thread_exit_code(exit_code)?
         } else {
-            // 64비트 결과이고 dw64_ret이 true인 경우: 파라미터 버퍼에서 값을 읽는다
+            // 64비트 결과이고 dw64_ret이 true인 경우: 파라미터 버퍼에서 값을 읽는다.
+            // delegator는 8바이트 결과를 버퍼 시작에 기록하므로 R은 최대 8바이트여야
+            // 하고, 8바이트 미만이면 하위 바이트를 담는다(리틀 엔디안).
+            if std::mem::size_of::<R>() > 8 {
+                return Err(YapiError::Custom(format!(
+                    "64-bit result buffer holds 8 bytes, but the requested result type is {} bytes",
+                    std::mem::size_of::<R>()
+                )));
+            }
+
             #[cfg(debug_assertions)]
             println!("64bit and dw64_ret is true");
 
@@ -455,7 +477,16 @@ where
         let mut buffer = Vec::new();
         match self.yapi_arch.func_arch {
             X86 => {
-                buffer.extend_from_slice(&(self.function_address as u32).to_le_bytes());
+                // 32비트 함수 주소는 반드시 하위 4GB 안에 있어야 한다.
+                // PE 파싱으로 얻은 주소라서 초과되면 모듈/플래그 불일치다.
+                // (인자 값은 C++ 원본과 동일하게 DWORD로 절단한다 — 호출자 의도 존중)
+                let func_addr = u32::try_from(self.function_address).map_err(|_| {
+                    YapiError::Custom(format!(
+                        "function address 0x{:X} exceeds 4GB but the function is 32-bit",
+                        self.function_address
+                    ))
+                })?;
+                buffer.extend_from_slice(&func_addr.to_le_bytes());
                 for &param in params {
                     buffer.extend_from_slice(&(param as u32).to_le_bytes());
                 }
@@ -471,6 +502,10 @@ where
 
         ProcessWriter::new(self.target_process_handle.as_raw(), &buffer, PAGE_READWRITE)
     }
+    /// 64비트 결과를 파라미터 버퍼에서 읽어오도록 설정한다 (C++ 원본의 `Dw64()`).
+    ///
+    /// true일 때 delegator가 기록한 8바이트 결과를 `size_of::<R>()`바이트만큼 읽는다.
+    /// R은 최대 8바이트(초과 시 오류), 그 미만이면 하위 바이트가 담긴다.
     pub fn set_dw64_ret(mut self, dw64_ret: bool) -> Self {
         self.dw64_ret = dw64_ret;
         self
@@ -551,7 +586,7 @@ where
                 modules.push(ModuleInfo {
                     base_address: me32.modBaseAddr as u64,
                     size: me32.modBaseSize,
-                    name: module_name.into(),
+                    name: module_name,
                 });
 
                 if !Module32NextW(snapshot, &mut me32).is_ok() {

@@ -93,6 +93,12 @@ impl ProcessHandle {
     }
 
     /// Create a remote thread using RtlCreateUserThread
+    ///
+    /// # Safety
+    ///
+    /// `start_address`는 대상 프로세스에서 실행 가능한 코드 주소여야 하고,
+    /// `parameter`는 그 코드가 기대하는 값이어야 한다. 스레드는 즉시 실행된다
+    /// (`create_suspended = false`일 때).
     pub unsafe fn create_thread(
         &self,
         create_suspended: bool,
@@ -140,10 +146,10 @@ impl ProcessHandle {
         let status = unsafe {
             rtl_create_user_thread(
                 self.handle.into(),
-                std::ptr::null(),     // lpThreadAttributes
-                create_suspended,     // createSuspended
-                0,                    // ZeroBits
-                std::ptr::null_mut(), // MaximumStackSize (기본 예약 크기)
+                std::ptr::null(),         // lpThreadAttributes
+                create_suspended,         // createSuspended
+                0,                        // ZeroBits
+                std::ptr::null_mut(),     // MaximumStackSize (기본 예약 크기)
                 committed_stack_size_ptr, // CommittedStackSize
                 start_address as usize,
                 parameter as usize,
@@ -227,7 +233,8 @@ impl ProcessHandle {
             let head: LdrDataTableEntry64 = self.reader.read(flink)?;
 
             // BaseDllName: UTF-16 버퍼(maximum_length는 바이트 단위)
-            let maximum_length = unsafe { head.base_dll_name.header.fields.maximum_length } as usize;
+            let maximum_length =
+                unsafe { head.base_dll_name.header.fields.maximum_length } as usize;
             let name_buffer = head.base_dll_name.buffer;
 
             // 비정상 엔트리 방어: 합리적인 길이와 유효한 버퍼만 처리
@@ -274,14 +281,14 @@ impl ProcessHandle {
 
             let result = loop {
                 let current_name = PWSTR::from_raw(me32.szModule.as_mut_ptr());
-                if let Ok(current_str) = current_name.to_string() {
-                    if current_str.to_uppercase() == module_name.to_uppercase() {
-                        break Ok(ModuleInfo {
-                            base_address: me32.modBaseAddr as u64,
-                            size: me32.modBaseSize,
-                            name: current_str,
-                        });
-                    }
+                if let Ok(current_str) = current_name.to_string()
+                    && current_str.to_uppercase() == module_name.to_uppercase()
+                {
+                    break Ok(ModuleInfo {
+                        base_address: me32.modBaseAddr as u64,
+                        size: me32.modBaseSize,
+                        name: current_str,
+                    });
                 }
 
                 if !Module32NextW(snapshot, &mut me32).is_ok() {
@@ -359,16 +366,18 @@ impl ProcessHandle {
                 && candidate[target.len()] == 0
                 && &candidate[..target.len()] == target.as_bytes()
             {
-                let ord: u16 = match self.reader.read(
-                    module_base + ied.AddressOfNameOrdinals as u64 + i as u64 * 2,
-                ) {
+                let ord: u16 = match self
+                    .reader
+                    .read(module_base + ied.AddressOfNameOrdinals as u64 + i as u64 * 2)
+                {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
 
-                let rva: u32 = match self.reader.read(
-                    module_base + ied.AddressOfFunctions as u64 + ord as u64 * 4,
-                ) {
+                let rva: u32 = match self
+                    .reader
+                    .read(module_base + ied.AddressOfFunctions as u64 + ord as u64 * 4)
+                {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
