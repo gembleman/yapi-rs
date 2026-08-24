@@ -197,9 +197,10 @@ where
     }
 
     pub fn call_function(&mut self, params: &[u64]) -> Result<R> {
+        // construct()에서 이미 검사하지만, 공개 필드 변경 등에 대비한 방어선이다
         if self.function_address == 0 {
-            return Err(YapiError::Memory(MemoryError::OperationFailed {
-                operation: "GetProcAddress".into(),
+            return Err(YapiError::Process(ProcessError::OperationFailed {
+                operation: "call_function: function address is zero",
             }));
         }
 
@@ -506,6 +507,8 @@ where
     ///
     /// true일 때 delegator가 기록한 8바이트 결과를 `size_of::<R>()`바이트만큼 읽는다.
     /// R은 최대 8바이트(초과 시 오류), 그 미만이면 하위 바이트가 담긴다.
+    ///
+    /// 32비트(X86) 함수에서는 무시된다 — 항상 스레드 종료 코드를 사용한다.
     pub fn set_dw64_ret(mut self, dw64_ret: bool) -> Self {
         self.dw64_ret = dw64_ret;
         self

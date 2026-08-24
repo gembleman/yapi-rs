@@ -41,8 +41,9 @@ impl ProcessWriter {
             println!("Bytes written: {}, Expected: {}", written, size);
 
             if written != size as u64 {
-                // MEM_RELEASE 사용 시 크기는 0이어야 한다
-                VirtualFreeEx(process, address.as_ptr(), 0, MEM_RELEASE)?;
+                // MEM_RELEASE 사용 시 크기는 0이어야 한다.
+                // 해제 실패는 무시한다 — 원인인 쓰기 실패를 그대로 보고한다.
+                let _ = VirtualFreeEx(process, address.as_ptr(), 0, MEM_RELEASE);
                 return Err(YapiError::Memory(MemoryError::WriteFailed {
                     address: address.as_ptr() as u64,
                     size,

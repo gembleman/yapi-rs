@@ -158,11 +158,14 @@ impl ProcessHandle {
             )
         };
 
-        if status.is_ok() {
+        // 게이트 경로와 동일하게 성공 + 눌 핸들을 함께 걸러낸다
+        if status.is_ok() && !thread_handle.0.is_null() {
             Ok(thread_handle)
         } else {
             Err(YapiError::Thread(ThreadError::CreationFailed {
-                reason: format!("RtlCreateUserThread failed with status: {:?}", status),
+                reason: format!(
+                    "RtlCreateUserThread failed with status: {status:?} (or returned a null handle)"
+                ),
             }))
         }
     }

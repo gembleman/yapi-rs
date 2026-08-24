@@ -3,6 +3,11 @@ use windows::Win32::Foundation::{HANDLE, NTSTATUS};
 
 pub type Result<T> = std::result::Result<T, YapiError>;
 
+/// 벡터 중간에 바이트열을 삽입한다.
+///
+/// # Panics
+///
+/// `index > self.len()`이면 패닉한다 (표준 슬라이스 경계 규칙).
 pub trait VecExtension {
     fn insert_slice(&mut self, index: usize, slice: &[u8]);
 }

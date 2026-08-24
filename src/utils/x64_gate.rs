@@ -8,7 +8,7 @@
 #![cfg(target_arch = "x86")]
 
 use crate::{MemoryError, Result, YapiError};
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Mutex};
 use windows::Win32::{
     Foundation::{HANDLE, NTSTATUS},
     System::Memory::{MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE, VirtualAlloc},
@@ -61,8 +61,19 @@ unsafe fn build_gate() -> Result<X64GateFn> {
     }
 }
 
-static GATE: LazyLock<std::result::Result<X64GateFn, String>> =
-    LazyLock::new(|| unsafe { build_gate() }.map_err(|e| e.to_string()));
+/// 게이트 스텁 함수 포인터 캐시. 할당 실패(None)는 기억하지 않으므로
+/// 다음 호출에서 다시 시도한다 (일시적 실패 복구).
+static GATE: Mutex<Option<X64GateFn>> = Mutex::new(None);
+
+fn cached_gate() -> Result<X64GateFn> {
+    let mut cached = GATE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(g) = *cached {
+        return Ok(g);
+    }
+    let built = unsafe { build_gate() }?;
+    *cached = Some(built);
+    Ok(built)
+}
 
 /// 현재(wow64) 프로세스의 64비트 ntdll에서 export 주소를 찾는다.
 fn resolve_local_ntdll_64_export(name: &[u8]) -> Option<u64> {
@@ -104,12 +115,14 @@ static RTL_CREATE_USER_THREAD_64: LazyLock<Option<u64>> =
 /// `func`은 현재(wow64) 프로세스에서 호출 가능한 64비트 함수 주소여야 하고,
 /// `args`는 해당 함수의 x64 호출 규약과 정확히 일치해야 한다.
 pub unsafe fn x64_call(func: u64, args: &[u64]) -> Result<u64> {
-    assert!(
-        args.len() <= 10,
-        "heaven's gate supports up to 10 arguments"
-    );
+    // 패닉 대신 오류로 보고한다 (라이브러리 전반의 Result 원칙)
+    if args.len() > 10 {
+        return Err(YapiError::Custom(
+            "heaven's gate supports up to 10 arguments".to_string(),
+        ));
+    }
 
-    let gate = (*GATE).clone().map_err(YapiError::Custom)?;
+    let gate = cached_gate()?;
 
     // 가변인자 호출: 인자 개수별 분기 (Rust는 슬라이스를 varargs로 흩을 수 없다)
     unsafe {
