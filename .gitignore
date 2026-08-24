@@ -2,3 +2,4 @@
 *.dll
 dll_test.rs
 *.md
+!README.md
