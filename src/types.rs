@@ -151,8 +151,12 @@ const _: () = {
 
 #[derive(Debug, Clone, Copy)]
 pub struct YapiArch {
+    /// OS 아키텍처(GetNativeSystemInfo 반환값). wow64 프로세스여도 네이티브
+    /// OS 비트가 담기므로 프로세스 비트로 읽지 않아야 한다.
     pub host_arch: Architecture,
+    /// 대상 프로세스의 아키텍처(wow64면 X86)
     pub target_proc_arch: Architecture,
+    /// 호출할 함수의 아키텍처(모듈 PE 헤더 폭 결정에 사용)
     pub func_arch: Architecture,
 }
 

@@ -24,14 +24,18 @@ fn result_from_thread_exit_code<R>(exit_code: u32) -> Result<R>
 where
     R: Copy + 'static + Default + std::fmt::Debug,
 {
-    if std::mem::size_of::<R>() != std::mem::size_of::<u32>() {
-        return Err(YapiError::Custom(format!(
-            "thread exit code is 4 bytes, but the requested result type is {} bytes",
-            std::mem::size_of::<R>()
-        )));
+    // C++ 원본과 동일하게 종료 코드를 반환한다: 4바이트 타입은 그대로,
+    // 8바이트 타입은 0 확장(DWORD → DWORD64)한 값을 담는다.
+    match std::mem::size_of::<R>() {
+        4 => Ok(unsafe { std::mem::transmute_copy(&exit_code) }),
+        8 => {
+            let widened = exit_code as u64;
+            Ok(unsafe { std::mem::transmute_copy(&widened) })
+        }
+        size => Err(YapiError::Custom(format!(
+            "thread exit code is 4 bytes (or zero-extended to 8), but the requested result type is {size} bytes"
+        ))),
     }
-
-    Ok(unsafe { std::mem::transmute_copy(&exit_code) })
 }
 
 #[derive(Debug, Clone)]
@@ -53,7 +57,9 @@ where
 {
     /// 호스트/대상/함수 아키텍처를 감지한다.
     fn detect_yapi_arch(target_process: HANDLE, is_64bit_func: bool) -> Result<YapiArch> {
-        // 호스트 프로세스 아키텍처 감지
+        // OS 아키텍처 감지.
+        // GetNativeSystemInfo는 wow64 프로세스에서도 네이티브 OS 아키텍처(예: AMD64)를
+        // 반환한다. host_arch는 프로세스 비트가 아니라 OS 비트로 읽어야 한다.
         let host_arch = unsafe {
             let mut si: SYSTEM_INFO = zeroed();
             GetNativeSystemInfo(&mut si);
@@ -116,7 +122,8 @@ where
             shell_code_arg_count: None,
             function_address,
             dw64_ret: false,
-            timeout: Some(Duration::from_secs(5)),
+            // C++ 원본과 동일하게 기본 대기는 INFINITE이다
+            timeout: None,
             yapi_arch,
             _phantom: PhantomData,
         })
@@ -550,8 +557,8 @@ mod tests {
     use super::result_from_thread_exit_code;
 
     #[test]
-    fn rejects_result_larger_than_thread_exit_code() {
-        let result = result_from_thread_exit_code::<u64>(0x1234_5678);
+    fn rejects_unsupported_result_size() {
+        let result = result_from_thread_exit_code::<u16>(0x1234_5678);
 
         assert!(result.is_err());
     }
@@ -561,5 +568,13 @@ mod tests {
         let result = result_from_thread_exit_code::<u32>(0x1234_5678);
 
         assert_eq!(result.unwrap(), 0x1234_5678);
+    }
+
+    #[test]
+    fn zero_extends_eight_byte_result_like_cpp_original() {
+        // C++ 원본은 DWORD 종료 코드를 DWORD64로 0 확장해 반환한다
+        let result = result_from_thread_exit_code::<u64>(0x1234_5678);
+
+        assert_eq!(result.unwrap(), 0x0000_0000_1234_5678);
     }
 }

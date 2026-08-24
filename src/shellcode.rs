@@ -133,9 +133,12 @@ impl ShellCodeBuilder {
                 self.make_x64_shell_code(cnt);
             }
             X86 => {
-                if cnt > 36 {
+                // je(rel8) 거리(바이트 9 = 0x0c + cnt*7)가 부호 있는 1바이트 범위(+127)를
+                // 넘지 않아야 한다. 원본 C++은 이 범위를 넘으면 조용히 손상되므로
+                // 명시적 오류로 바꾼다 (0x0c + cnt*7 <= 127 → cnt <= 16).
+                if cnt > 16 {
                     return Err(YapiError::Custom(
-                        "Maximum 36 parameters supported for 32-bit functions".to_string(),
+                        "Maximum 16 parameters supported for 32-bit functions".to_string(),
                     ));
                 }
                 self.make_x86_shell_code(cnt);
@@ -183,7 +186,18 @@ mod tests {
 
     #[test]
     fn rejects_too_many_args_for_x86() {
+        assert!(builder(Architecture::X86).make_shell_code(17).is_err());
         assert!(builder(Architecture::X86).make_shell_code(37).is_err());
+    }
+
+    #[test]
+    fn accepts_sixteen_args_for_x86() {
+        // je(rel8) 거리 한계 내 최대 인자 수
+        let code = builder(Architecture::X86)
+            .make_shell_code(16)
+            .unwrap()
+            .build();
+        assert_eq!(code.len(), 36 + 16 * 7);
     }
 
     #[test]
