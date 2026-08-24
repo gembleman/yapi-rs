@@ -20,6 +20,20 @@ use windows::Win32::{
     },
 };
 
+fn result_from_thread_exit_code<R>(exit_code: u32) -> Result<R>
+where
+    R: Copy + 'static + Default + std::fmt::Debug,
+{
+    if std::mem::size_of::<R>() != std::mem::size_of::<u32>() {
+        return Err(YapiError::Custom(format!(
+            "thread exit code is 4 bytes, but the requested result type is {} bytes",
+            std::mem::size_of::<R>()
+        )));
+    }
+
+    Ok(unsafe { std::mem::transmute_copy(&exit_code) })
+}
+
 #[derive(Debug, Clone)]
 pub struct YAPICall<R = u64> {
     pub target_process_handle: ProcessHandle,
@@ -131,7 +145,7 @@ where
             self.init_shell_code(params.len() as u8)?;
 
             // 3. 파라미터 버퍼 준비
-            let param_buffer = self.prepare_params(params)?;
+            let mut param_buffer = self.prepare_params(params)?;
 
             #[cfg(debug_assertions)]
             {
@@ -176,8 +190,11 @@ where
             }
 
             // 4. 원격 스레드 실행
-            self.execute_remote_thread(param_buffer.address().as_ptr())
-            // Ok(R::default())
+            let result = self.execute_remote_thread(param_buffer.address().as_ptr());
+            if result.is_err() {
+                param_buffer.dont_free();
+            }
+            result
         }
     }
 
@@ -185,22 +202,23 @@ where
         #[cfg(target_arch = "x86_64")]
         let shell_code_addr = self.shell_code_memory.as_ref().unwrap().address().as_ptr() as u64;
 
-        let thread_handle = match self.yapi_arch.host_arch {
+        let (thread_handle, mut bridge_code_mem) = match self.yapi_arch.host_arch {
             Architecture::X86 => {
                 match (self.yapi_arch.target_proc_arch, self.yapi_arch.func_arch) {
                     // 호스트가 32비트이고, 타깃 프로세스가 32비트, 함수가 32비트인 경우, 쉘코드도 32비트.
                     (Architecture::X86, Architecture::X86) => {
                         #[cfg(debug_assertions)]
                         println!("host is 32bit func is 32");
-                        unsafe {
+                        let handle = unsafe {
                             self.target_process_handle.create_thread(
                                 false,
                                 None,
-                                self.shell_code_memory.as_ref().unwrap().address().as_ptr() as u32
+                                self.shell_code_memory.as_ref().unwrap().address().as_ptr()
                                     as u64,
-                                param_address as u32 as u64,
+                                param_address as u64,
                             )
-                        }?
+                        }?;
+                        (handle, None)
                     }
                     //WOW64(32비트) 호스트에서 64비트 타겟 프로세스의 64비트 API를 호출할 때
                     (Architecture::X64, Architecture::X64) => {
@@ -244,15 +262,15 @@ where
                             &X64_CALL,
                             PAGE_EXECUTE_READWRITE,
                         )?;
-
-                        unsafe {
+                        let handle = unsafe {
                             self.target_process_handle.create_thread(
                                 false,
                                 None,
                                 bridge_code_mem.address().as_ptr() as u64,
-                                param_address as u32 as u64,
+                                param_address as u64,
                             )
-                        }?
+                        }?;
+                        (handle, Some(bridge_code_mem))
                     }
                     _ => {
                         return Err(YapiError::Custom(
@@ -268,7 +286,7 @@ where
                     (Architecture::X86, Architecture::X86) => {
                         #[cfg(debug_assertions)]
                         println!("host is 64bit func is wow32");
-                        unsafe {
+                        let handle = unsafe {
                             CreateRemoteThread(
                                 self.target_process_handle.as_raw(),
                                 None,
@@ -278,7 +296,8 @@ where
                                 0,
                                 None,
                             )
-                        }?
+                        }?;
+                        (handle, None)
                     }
                     // 호스트가 64비트이고, 타깃 프로세스가 32비트(wow64), 함수가 64비트인 경우, 쉘코드도 32비트. - 브릿지 코드 사용.
                     (Architecture::X86, Architecture::X64) => {
@@ -301,7 +320,7 @@ where
                             &K_TMPL_X64_TO_X86,
                             PAGE_EXECUTE_READWRITE,
                         )?;
-                        unsafe {
+                        let handle = unsafe {
                             CreateRemoteThread(
                                 self.target_process_handle.as_raw(),
                                 None,
@@ -311,7 +330,8 @@ where
                                 0,
                                 None,
                             )
-                        }?
+                        }?;
+                        (handle, Some(bridge_code_mem))
                     }
 
                     // 호스트가 64비트이고, 타깃 프로세스가 64비트, 함수도 64비트인 경우, 쉘코드도 64비트.
@@ -320,7 +340,7 @@ where
                         println!("host is 64bit func is 64");
                         println!("shell_code_addr: 0x{:X}", shell_code_addr);
 
-                        unsafe {
+                        let handle = unsafe {
                             CreateRemoteThread(
                                 self.target_process_handle.as_raw(),
                                 None,
@@ -330,7 +350,8 @@ where
                                 0,
                                 None,
                             )
-                        }?
+                        }?;
+                        (handle, None)
                     }
                     // 호스트가 64비트이고, 타깃 프로세스가 64비트, 함수가 32비트인 경우, 에러.
                     (Architecture::X64, Architecture::X86) => {
@@ -353,6 +374,9 @@ where
             .unwrap_or(INFINITE);
 
         if unsafe { WaitForSingleObject(thread_handle, timeout_ms) } != WAIT_OBJECT_0 {
+            if let Some(bridge) = bridge_code_mem.as_mut() {
+                bridge.dont_free();
+            }
             self.shell_code_memory.as_mut().map(|sc| sc.dont_free());
             unsafe { CloseHandle(thread_handle) }?;
             return Err(YapiError::Thread(ThreadError::TimeoutError {
@@ -360,14 +384,14 @@ where
             }));
         }
 
-        let result = if self.yapi_arch.host_arch == Architecture::X86 || !self.dw64_ret {
+        let result = if self.yapi_arch.func_arch == Architecture::X86 || !self.dw64_ret {
             // 32비트 또는 dw64_ret이 false인 경우
             #[cfg(debug_assertions)]
             println!("32bit or dw64_ret is false");
 
             let mut exit_code = 0u32;
             unsafe { GetExitCodeThread(thread_handle, &mut exit_code) }?;
-            unsafe { std::mem::transmute_copy(&exit_code) }
+            result_from_thread_exit_code(exit_code)?
         } else {
             // 64비트이고 dw64_ret이 true인 경우
             #[cfg(debug_assertions)]
@@ -436,31 +460,18 @@ where
 
     unsafe fn prepare_params(&self, params: &[u64]) -> Result<ProcessWriter> {
         let mut buffer = Vec::new();
-        let initial_size = match self.yapi_arch.func_arch {
-            X86 => 4 + (params.len() * 4), // 함수 포인터(4) + 파라미터들(4 * n)
-            X64 => 8 + 8 + (params.len() * 8), // dw64_ret(8) + 함수 포인터(8) + 파라미터들(8 * n)
-        };
-        buffer.resize(initial_size, 0);
-
         match self.yapi_arch.func_arch {
             X86 => {
-                // 32비트 함수 포인터가 첫 번째 위치에 와야 함
-                buffer.insert_slice(0, &(self.function_address as u32).to_le_bytes());
-                let mut offset = 4;
-                // 그 다음에 파라미터들
+                buffer.extend_from_slice(&(self.function_address as u32).to_le_bytes());
                 for &param in params {
-                    buffer.insert_slice(offset, &(param as u32).to_le_bytes());
-                    offset += 4;
+                    buffer.extend_from_slice(&(param as u32).to_le_bytes());
                 }
             }
             X64 => {
-                // 64비트는 그대로
-                buffer.insert_slice(0, &(self.dw64_ret as u64).to_le_bytes());
-                buffer.insert_slice(8, &self.function_address.to_le_bytes());
-                let mut offset = 16;
+                buffer.extend_from_slice(&(self.dw64_ret as u64).to_le_bytes());
+                buffer.extend_from_slice(&self.function_address.to_le_bytes());
                 for &param in params {
-                    buffer.insert_slice(offset, &param.to_le_bytes());
-                    offset += 8;
+                    buffer.extend_from_slice(&param.to_le_bytes());
                 }
             }
         }
@@ -500,7 +511,7 @@ where
         unsafe {
             let snapshot = CreateToolhelp32Snapshot(
                 TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32,
-                GetCurrentProcessId(),
+                GetProcessId(self.target_process_handle.as_raw()),
             )?;
 
             let _guard = scopeguard::guard(snapshot, |h| {
@@ -534,5 +545,24 @@ where
 
             Ok(modules)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::result_from_thread_exit_code;
+
+    #[test]
+    fn rejects_result_larger_than_thread_exit_code() {
+        let result = result_from_thread_exit_code::<u64>(0x1234_5678);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn preserves_four_byte_thread_exit_code() {
+        let result = result_from_thread_exit_code::<u32>(0x1234_5678);
+
+        assert_eq!(result.unwrap(), 0x1234_5678);
     }
 }

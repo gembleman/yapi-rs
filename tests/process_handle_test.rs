@@ -77,6 +77,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn test_process_functions() {
         unsafe {

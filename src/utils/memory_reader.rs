@@ -53,6 +53,13 @@ pub struct Process32Reader {
 impl MemoryReader for Process32Reader {
     fn read<T: Sized>(&self, address: u64) -> Result<T> {
         unsafe {
+            if address > u32::MAX as u64 {
+                return Err(YapiError::Memory(MemoryError::ReadFailed {
+                    address,
+                    size: std::mem::size_of::<T>(),
+                }));
+            }
+
             let mut buffer: T = zeroed();
             let size = std::mem::size_of::<T>();
             let mut bytes_read = 0;
@@ -73,8 +80,15 @@ impl MemoryReader for Process32Reader {
 
     fn read_array<T: Sized>(&self, address: u64, count: usize) -> Result<Vec<T>> {
         unsafe {
-            let mut buffer = Vec::with_capacity(count);
-            buffer.set_len(count);
+            if address > u32::MAX as u64 {
+                return Err(YapiError::Memory(MemoryError::ReadFailed {
+                    address,
+                    size: std::mem::size_of::<T>() * count,
+                }));
+            }
+
+            let mut buffer: Vec<std::mem::MaybeUninit<T>> = Vec::with_capacity(count);
+            buffer.resize_with(count, std::mem::MaybeUninit::uninit);
             let size = std::mem::size_of::<T>() * count;
             let mut bytes_read = 0;
 
@@ -85,10 +99,13 @@ impl MemoryReader for Process32Reader {
                 size,
                 Some(&mut bytes_read),
             )
-            .map_err(|e| YapiError::Windows(e))?;
+            .map_err(YapiError::Windows)?;
 
             Self::validate_read(bytes_read, size, address)?;
-            Ok(buffer)
+            Ok(buffer
+                .into_iter()
+                .map(|value| value.assume_init())
+                .collect::<Vec<T>>())
         }
     }
 }
@@ -122,8 +139,8 @@ impl MemoryReader for Process64Reader {
 
     fn read_array<T: Sized>(&self, address: u64, count: usize) -> Result<Vec<T>> {
         unsafe {
-            let mut buffer = Vec::with_capacity(count);
-            buffer.set_len(count);
+            let mut buffer: Vec<std::mem::MaybeUninit<T>> = Vec::with_capacity(count);
+            buffer.resize_with(count, std::mem::MaybeUninit::uninit);
             let size = std::mem::size_of::<T>() * count;
             let mut bytes_read = 0u64;
 
@@ -138,7 +155,10 @@ impl MemoryReader for Process64Reader {
             if !nt_success(status) || bytes_read != size as u64 {
                 return Err(YapiError::Memory(MemoryError::ReadFailed { address, size }));
             }
-            Ok(buffer)
+            Ok(buffer
+                .into_iter()
+                .map(|value| value.assume_init())
+                .collect::<Vec<T>>())
         }
     }
 }

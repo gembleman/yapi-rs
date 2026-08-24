@@ -6,12 +6,11 @@ use windows::{
         Foundation::*,
         System::{
             Diagnostics::{Debug::*, ToolHelp::*},
-            LibraryLoader::GetProcAddress,
             SystemServices::*,
             Threading::*,
         },
     },
-    core::{PCSTR, PWSTR, s, w},
+    core::{PWSTR, s, w},
 };
 
 // RtlCreateUserThread function type definition
@@ -22,8 +21,8 @@ type RtlCreateUserThreadFn = unsafe extern "system" fn(
     zero_bits: u32,
     maximum_stack_size: *mut usize,
     committed_stack_size: *mut usize,
-    start_address: u64,
-    parameter: u64,
+    start_address: usize,
+    parameter: usize,
     thread_handle: *mut HANDLE,
     client_id: *mut c_void,
 ) -> NTSTATUS;
@@ -119,6 +118,13 @@ impl ProcessHandle {
             std::ptr::null_mut()
         };
 
+        #[cfg(target_arch = "x86")]
+        if start_address > u32::MAX as u64 || parameter > u32::MAX as u64 {
+            return Err(YapiError::Custom(
+                "start address and parameter must be below 4GB on 32-bit hosts".to_string(),
+            ));
+        }
+
         let status = unsafe {
             rtl_create_user_thread(
                 self.handle.into(),
@@ -127,8 +133,8 @@ impl ProcessHandle {
                 0,                // ZeroBits
                 stack_size_ptr,   // MaximumStackSize
                 stack_size_ptr,   // CommittedStackSize (같은 값 사용)
-                start_address,
-                parameter,
+                start_address as usize,
+                parameter as usize,
                 &mut thread_handle,
                 std::ptr::null_mut(), // ClientId
             )
@@ -197,34 +203,10 @@ impl ProcessHandle {
     }
 
     pub fn get_proc_address(&self, module_base: u64, func_name: &str) -> Result<u64> {
-        match self.yapi_arch.host_arch {
-            Architecture::X86 => self.get_proc_address32(module_base, func_name),
-            Architecture::X64 => self.get_proc_address64(module_base, func_name),
-        }
+        self.get_proc_address_remote(module_base, func_name)
     }
 
-    fn get_proc_address32(&self, module_base: u64, func_name: &str) -> Result<u64> {
-        unsafe {
-            let mut proc_name = func_name.to_string();
-            if !proc_name.ends_with('\0') {
-                proc_name.push('\0');
-            }
-
-            GetProcAddress(
-                HMODULE(module_base as *mut c_void),
-                PCSTR(proc_name.as_ptr()),
-            )
-            .map(|addr| addr as u64)
-            .ok_or_else(|| {
-                YapiError::Process(ProcessError::FunctionNotFound {
-                    name: func_name.to_string(),
-                    module: format!("0x{:x}", module_base),
-                })
-            })
-        }
-    }
-
-    pub fn get_proc_address64(&self, module_base: u64, func_name: &str) -> Result<u64> {
+    fn get_proc_address_remote(&self, module_base: u64, func_name: &str) -> Result<u64> {
         if module_base == 0 || func_name.is_empty() {
             return Err(YapiError::Memory(MemoryError::OperationFailed {
                 operation: "get_proc_address: invalid module base or empty function name".into(),
