@@ -36,18 +36,31 @@ static SELF_REAL_HANDLE: LazyLock<usize> = LazyLock::new(|| {
 /// NtWow64*/게이트 호출용으로 의사 핸들을 실제 핸들로 대체한다.
 pub(crate) unsafe fn ensure_real_handle(process: HANDLE) -> HANDLE {
     unsafe {
-        if process.0.is_null() || process == windows::Win32::System::Threading::GetCurrentProcess()
-        {
-            let cached = *SELF_REAL_HANDLE;
-            if cached != 0 {
-                HANDLE(cached as *mut core::ffi::c_void)
-            } else {
-                process
-            }
+        if let Some(real) = self_real_handle_or_none(process) {
+            real
         } else {
             process
         }
     }
+}
+
+/// process가 현재 프로세스를 가리키면 캐시된 실제 핸들을 반환한다.
+fn self_real_handle_or_none(process: HANDLE) -> Option<HANDLE> {
+    let is_pseudo = process.0.is_null()
+        || unsafe { process == windows::Win32::System::Threading::GetCurrentProcess() };
+    if is_pseudo {
+        self_real_handle()
+    } else {
+        None
+    }
+}
+
+/// 현재 프로세스의 실제 핸들(전역 캐시). 캐싱 실패 시 None.
+///
+/// 정적 캐시이므로 인스턴스마다 OpenProcess를 다시 열지 않는다(핸들 누수 방지).
+pub(crate) fn self_real_handle() -> Option<HANDLE> {
+    let cached = *SELF_REAL_HANDLE;
+    (cached != 0).then(|| HANDLE(cached as *mut core::ffi::c_void))
 }
 
 // Memory reading trait with additional helper method

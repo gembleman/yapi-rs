@@ -69,6 +69,10 @@ pub enum ThreadError {
     /// Thread operation timed out
     #[error("Thread operation timed out after {ms}ms")]
     TimeoutError { ms: u32 },
+
+    /// Waiting on the remote thread failed (not a timeout)
+    #[error("Waiting for remote thread failed: {reason}")]
+    WaitFailed { reason: String },
 }
 
 impl From<MemoryError> for YapiError {

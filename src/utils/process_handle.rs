@@ -40,10 +40,16 @@ impl ProcessHandle {
         // NULL 또는 의사 핸들(GetCurrentProcess())은 현재 프로세스의 실제 핸들로 대체한다.
         // wow64의 NtWow64* 함수는 의사 핸들을 STATUS_INVALID_HANDLE로 거부하므로
         // C++ 원본처럼 OpenProcess로 연 실제 핸들이 필요하다.
+        // 전역 캐시를 재사용하므로 인스턴스마다 핸들을 새로 열지 않는다(누수 방지).
         let current_pseudo = unsafe { GetCurrentProcess() };
         let handle = if handle.0.is_null() || handle == current_pseudo {
-            let pid = unsafe { GetProcessId(current_pseudo) };
-            unsafe { OpenProcess(PROCESS_ALL_ACCESS, false, pid)? }
+            match crate::utils::memory_reader::self_real_handle() {
+                Some(real) => real,
+                None => {
+                    let pid = unsafe { GetProcessId(current_pseudo) };
+                    unsafe { OpenProcess(PROCESS_ALL_ACCESS, false, pid)? }
+                }
+            }
         } else {
             handle
         };
@@ -212,7 +218,12 @@ impl ProcessHandle {
             peb.ldr + std::mem::offset_of!(PebLdrData64, in_load_order_module_list) as u64;
 
         let mut flink = ldr.in_load_order_module_list.flink;
-        while flink != 0 && flink != last_entry {
+        // 손상된 리스트로 인한 무한 루프를 막는 상한 (실제 모듈 수보다 훨씬 크다)
+        const MAX_LDR_ENTRIES: usize = 4096;
+        for _ in 0..MAX_LDR_ENTRIES {
+            if flink == 0 || flink == last_entry {
+                break;
+            }
             let head: LdrDataTableEntry64 = self.reader.read(flink)?;
 
             // BaseDllName: UTF-16 버퍼(maximum_length는 바이트 단위)
@@ -326,17 +337,28 @@ impl ProcessHandle {
             ied.NumberOfNames as usize,
         )?;
 
+        // NUL 접미사를 정규화한다 (호출자가 "Func\0"처럼 넘겨도 동일하게 처리)
+        let target = func_name.strip_suffix('\0').unwrap_or(func_name);
+
         for i in 0..ied.NumberOfNames {
             // 개별 이름/서수 읽기 실패는 건너뛰고 계속 탐색한다 (C++ 구현과 동일)
-            let func: Vec<u8> = match self
-                .reader
-                .read_array(module_base + name_table[i as usize] as u64, func_name.len())
-            {
+            //
+            // 이름 + NUL 종료까지 읽어 완전 일치할 때만 채택한다.
+            // C++ 원본은 strlen 바이트만 비교해 접두사("NtCreate" → "NtCreateFile")가
+            // 잘못 매칭될 수 있었다.
+            let candidate: Vec<u8> = match self.reader.read_array(
+                module_base + name_table[i as usize] as u64,
+                target.len() + 1,
+            ) {
                 Ok(v) => v,
                 Err(_) => continue,
             };
 
-            if func == func_name.as_bytes() {
+            // 마지막 바이트가 NUL로 끝나고 이름이 완전히 일치할 때만 채택한다
+            if candidate.len() == target.len() + 1
+                && candidate[target.len()] == 0
+                && &candidate[..target.len()] == target.as_bytes()
+            {
                 let ord: u16 = match self.reader.read(
                     module_base + ied.AddressOfNameOrdinals as u64 + i as u64 * 2,
                 ) {

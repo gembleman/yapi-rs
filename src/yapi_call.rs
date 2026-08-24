@@ -9,9 +9,9 @@ use std::ffi::c_void;
 use std::marker::PhantomData;
 use std::mem::zeroed;
 use std::time::Duration;
-use windows::Win32::Foundation::WAIT_OBJECT_0;
+use windows::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows::Win32::{
-    Foundation::{CloseHandle, FALSE, HANDLE},
+    Foundation::{CloseHandle, FALSE, GetLastError, HANDLE},
     System::{
         Diagnostics::{Debug::ReadProcessMemory, ToolHelp::*},
         Memory::*,
@@ -133,6 +133,9 @@ where
     ///
     /// `is_64bit_func`은 대상 프로세스가 32비트(wow64)일 때 64비트 함수를 찾는 경우에만 true.
     /// 64비트 함수는 대상 프로세스의 64비트 PEB를 순회해 모듈을 찾는다(GetModuleHandle64).
+    ///
+    /// C++ 원본의 `(hProcess, modName, funcName)` 생성자와 달리 64비트 조회 실패 시
+    /// 32비트로 자동 폴백하지 않는다. 어느 쪽인지 알 수 없으면 두 번 생성해 보라.
     pub fn new(
         target_process: HANDLE,
         module_name: &str,
@@ -345,9 +348,10 @@ where
             },
         };
 
+        // u128 밀리초를 u32로 줄일 때 랩어라웃되지 않도록 포화시킨다
         let timeout_ms = self
             .timeout
-            .map(|d| d.as_millis() as u32)
+            .map(|d| u32::try_from(d.as_millis()).unwrap_or(INFINITE))
             .unwrap_or(INFINITE);
 
         // 성공/실패 모든 경로에서 스레드 핸들이 닫히도록 보장한다
@@ -355,13 +359,21 @@ where
             let _ = unsafe { CloseHandle(h) };
         });
 
-        if unsafe { WaitForSingleObject(thread_handle, timeout_ms) } != WAIT_OBJECT_0 {
-            // 타임아웃 시 원격 스레드가 아직 메모리를 사용 중일 수 있으므로 해제를 보류한다
+        let wait = unsafe { WaitForSingleObject(thread_handle, timeout_ms) };
+        if wait != WAIT_OBJECT_0 {
+            // 원격 스레드가 아직 메모리를 사용 중일 수 있으므로 해제를 보류한다
             if let Some(sc) = self.shell_code_memory.as_mut() {
                 sc.dont_free();
             }
-            return Err(YapiError::Thread(ThreadError::TimeoutError {
-                ms: timeout_ms,
+            if wait == WAIT_TIMEOUT {
+                return Err(YapiError::Thread(ThreadError::TimeoutError {
+                    ms: timeout_ms,
+                }));
+            }
+            // WAIT_FAILED 등: 타임아웃이 아니라 대기 자체가 실패했다
+            let last_error = unsafe { GetLastError() };
+            return Err(YapiError::Thread(ThreadError::WaitFailed {
+                reason: format!("GetLastError=0x{:08X}", last_error.0),
             }));
         }
 
@@ -525,25 +537,25 @@ where
             let mut me32: MODULEENTRY32W = zeroed();
             me32.dwSize = std::mem::size_of::<MODULEENTRY32W>() as u32;
 
-            if Module32FirstW(snapshot, &mut me32).is_ok() {
-                loop {
-                    let module_name = String::from_utf16_lossy(
-                        &me32.szModule[..me32
-                            .szModule
-                            .iter()
-                            .position(|&c| c == 0)
-                            .unwrap_or(me32.szModule.len())],
-                    );
+            // 열거 시작 실패(권한 부족 등)는 빈 결과가 아니라 오류로 알린다
+            Module32FirstW(snapshot, &mut me32)?;
+            loop {
+                let module_name = String::from_utf16_lossy(
+                    &me32.szModule[..me32
+                        .szModule
+                        .iter()
+                        .position(|&c| c == 0)
+                        .unwrap_or(me32.szModule.len())],
+                );
 
-                    modules.push(ModuleInfo {
-                        base_address: me32.modBaseAddr as u64,
-                        size: me32.modBaseSize,
-                        name: module_name.into(),
-                    });
+                modules.push(ModuleInfo {
+                    base_address: me32.modBaseAddr as u64,
+                    size: me32.modBaseSize,
+                    name: module_name.into(),
+                });
 
-                    if !Module32NextW(snapshot, &mut me32).is_ok() {
-                        break;
-                    }
+                if !Module32NextW(snapshot, &mut me32).is_ok() {
+                    break;
                 }
             }
 
