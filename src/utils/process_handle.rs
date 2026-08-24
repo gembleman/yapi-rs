@@ -37,10 +37,13 @@ pub struct ProcessHandle {
 
 impl ProcessHandle {
     pub fn new(handle: HANDLE, yapi_arch: YapiArch) -> Result<Self> {
-        // NULL 핸들만 현재 프로세스로 대체한다.
-        // INVALID 핸들은 그대로 통과시켜 이후 API 호출에서 오류로 드러나게 한다.
-        let handle = if handle.0.is_null() {
-            unsafe { GetCurrentProcess() }
+        // NULL 또는 의사 핸들(GetCurrentProcess())은 현재 프로세스의 실제 핸들로 대체한다.
+        // wow64의 NtWow64* 함수는 의사 핸들을 STATUS_INVALID_HANDLE로 거부하므로
+        // C++ 원본처럼 OpenProcess로 연 실제 핸들이 필요하다.
+        let current_pseudo = unsafe { GetCurrentProcess() };
+        let handle = if handle.0.is_null() || handle == current_pseudo {
+            let pid = unsafe { GetProcessId(current_pseudo) };
+            unsafe { OpenProcess(PROCESS_ALL_ACCESS, false, pid)? }
         } else {
             handle
         };
@@ -166,6 +169,78 @@ impl ProcessHandle {
             })),
         }
     }
+
+    /// 대상 프로세스의 64비트 모듈을 찾는다 (C++ 원본의 GetModuleHandle64 포팅).
+    ///
+    /// NtQueryInformationProcess/NtWow64QueryInformationProcess64로 64비트 PEB 주소를 얻은 뒤,
+    /// InLoadOrderModuleList를 순회하며 모듈 이름을 비교한다.
+    /// 32비트 호스트에서 64비트 대상의 ntdll64 같은 모듈을 찾을 때 필요하다.
+    pub fn get_module_handle_64(&self, module_name: &str) -> Result<ModuleInfo> {
+        if module_name.is_empty() {
+            return Err(YapiError::Process(ProcessError::ModuleNotFound {
+                name: String::from("<empty>"),
+            }));
+        }
+
+        match self.get_module_handle_64_with_peb(module_name) {
+            Ok(info) => Ok(info),
+            Err(_) => Err(YapiError::Process(ProcessError::ModuleNotFound {
+                name: module_name.to_string(),
+            })),
+        }
+    }
+
+    fn get_module_handle_64_with_peb(&self, module_name: &str) -> Result<ModuleInfo> {
+        let pbi = unsafe { nt_wow64_query_information_process64(self.as_raw())? };
+
+        let peb: Peb64 = self.reader.read(pbi.peb_base_address)?;
+        if peb.ldr == 0 {
+            return Err(YapiError::Memory(MemoryError::OperationFailed {
+                operation: "get_module_handle_64: target PEB has no loader data".into(),
+            }));
+        }
+
+        let ldr: PebLdrData64 = self.reader.read(peb.ldr)?;
+
+        // 리스트 헤더 주소(PEB_LDR_DATA + InLoadOrderModuleList 오프셋)가 순회 종료 조건
+        let last_entry =
+            peb.ldr + std::mem::offset_of!(PebLdrData64, in_load_order_module_list) as u64;
+
+        let mut flink = ldr.in_load_order_module_list.flink;
+        while flink != 0 && flink != last_entry {
+            let head: LdrDataTableEntry64 = self.reader.read(flink)?;
+
+            // BaseDllName: UTF-16 버퍼(maximum_length는 바이트 단위)
+            let maximum_length = unsafe { head.base_dll_name.header.fields.maximum_length } as usize;
+            let name_buffer = head.base_dll_name.buffer;
+
+            // 비정상 엔트리 방어: 합리적인 길이와 유효한 버퍼만 처리
+            if maximum_length > 0
+                && maximum_length <= 520
+                && (maximum_length & 1) == 0
+                && name_buffer != 0
+            {
+                let chars: Vec<u16> = self.reader.read_array(name_buffer, maximum_length / 2)?;
+                let current_name = String::from_utf16_lossy(&chars)
+                    .trim_end_matches('\0')
+                    .to_string();
+
+                if current_name.to_uppercase() == module_name.to_uppercase() {
+                    return Ok(ModuleInfo {
+                        base_address: head.dll_base,
+                        size: head.size_of_image,
+                        name: current_name,
+                    });
+                }
+            }
+
+            flink = head.in_load_order_links.flink;
+        }
+
+        Err(YapiError::Process(ProcessError::ModuleNotFound {
+            name: module_name.to_string(),
+        }))
+    }
     fn get_module_handle_with_snapshot(&self, module_name: &str) -> Result<ModuleInfo> {
         unsafe {
             let process_id = GetProcessId(self.handle.into());
@@ -217,7 +292,9 @@ impl ProcessHandle {
         }
 
         let idh: IMAGE_DOS_HEADER = self.reader.read(module_base)?;
-        let idd = if self.yapi_arch.target_proc_arch == Architecture::X64 {
+        // PE 헤더 폭은 대상 프로세스가 아니라 모듈(함수)의 아키텍처를 따른다.
+        // wow64 대상의 64비트 모듈(ntdll64 등)은 32비트 프로세스 안에 있어도 64비트 헤더를 가진다.
+        let idd = if self.yapi_arch.func_arch == Architecture::X64 {
             let inh64: IMAGE_NT_HEADERS64 = self.reader.read(module_base + idh.e_lfanew as u64)?;
             inh64.OptionalHeader.DataDirectory[0]
         } else {

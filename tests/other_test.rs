@@ -1,6 +1,6 @@
-﻿use std::ffi::c_void;
+use std::ffi::c_void;
 use windows::Win32::System::{Memory::PAGE_READWRITE, Threading::GetCurrentProcess};
-use yapi::ProcessWriter;
+use yapi::{Architecture, ProcessHandle, ProcessWriter, YapiArch};
 
 #[test]
 fn test_process_writer() {
@@ -24,4 +24,20 @@ fn test_process_writer() {
         assert_eq!(bytes_read, 4);
         assert_eq!(&read_back, &data);
     }
+}
+
+#[test]
+fn test_get_module_handle_64_on_self() {
+    // 자기 프로세스의 64비트 PEB를 순회해 ntdll을 찾는다 (GetModuleHandle64 포팅 검증)
+    let arch = YapiArch::new(Architecture::X64, Architecture::X64, Architecture::X64);
+    let handle = unsafe { ProcessHandle::new(GetCurrentProcess(), arch) }.unwrap();
+
+    let module = handle.get_module_handle_64("ntdll.dll").unwrap();
+    assert!(module.base_address != 0, "ntdll base address is zero");
+    assert!(module.size > 0, "ntdll size is zero");
+
+    let func = handle
+        .get_proc_address(module.base_address, "NtQueryInformationProcess")
+        .unwrap();
+    assert!(func > module.base_address, "export outside of module range");
 }

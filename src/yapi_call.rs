@@ -92,7 +92,13 @@ where
         #[cfg(debug_assertions)]
         println!("Looking for module {} ({:?})", module_name, func_arch);
 
-        let module_info = target_process_handle.get_module_handle(module_name)?;
+        // 64비트 함수는 대상 프로세스의 64비트 PEB를 순회해 모듈을 찾는다 (GetModuleHandle64).
+        // wow64 대상의 ntdll64 같은 모듈은 32비트 스냅샷 목록에 잡히지 않을 수 있다.
+        let module_info = if func_arch == Architecture::X64 {
+            target_process_handle.get_module_handle_64(module_name)?
+        } else {
+            target_process_handle.get_module_handle(module_name)?
+        };
         let function_address =
             target_process_handle.get_proc_address(module_info.base_address, func_name)?;
 
