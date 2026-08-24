@@ -170,6 +170,11 @@ impl ProcessHandle {
         }
     }
 
+    /// 대상 프로세스의 64비트 ntdll 기본 주소를 반환한다 (C++ 원본의 GetNtDll64 대응).
+    pub fn get_ntdll_64(&self) -> Result<u64> {
+        Ok(self.get_module_handle_64("ntdll.dll")?.base_address)
+    }
+
     /// 대상 프로세스의 64비트 모듈을 찾는다 (C++ 원본의 GetModuleHandle64 포팅).
     ///
     /// NtQueryInformationProcess/NtWow64QueryInformationProcess64로 64비트 PEB 주소를 얻은 뒤,

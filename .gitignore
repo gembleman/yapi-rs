@@ -1,3 +1,4 @@
 /target
 *.dll
 dll_test.rs
+*.md

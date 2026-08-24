@@ -1,14 +1,12 @@
+use crate::utils::nt_wow64_write_virtual_memory64;
 use crate::{MemoryError, YapiError, types::*};
 use std::ffi::c_void;
 use std::ptr::NonNull;
 use windows::Win32::{
     Foundation::HANDLE,
-    System::{
-        Diagnostics::Debug::WriteProcessMemory,
-        Memory::{
-            MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_PROTECTION_FLAGS, VirtualAllocEx,
-            VirtualFreeEx,
-        },
+    System::Memory::{
+        MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_PROTECTION_FLAGS, VirtualAllocEx,
+        VirtualFreeEx,
     },
 };
 
@@ -30,22 +28,20 @@ impl ProcessWriter {
             let address = NonNull::new(address)
                 .ok_or_else(|| YapiError::Memory(MemoryError::AllocationFailed))?;
 
-            let mut written = 0;
-            let success = WriteProcessMemory(
-                process,
-                address.as_ptr(),
+            // x86 호스트에서도 NtWow64WriteVirtualMemory64로 4GB 이상 주소에 쓸 수 있다
+            let mut written = 0u64;
+            nt_wow64_write_virtual_memory64(
+                process.into(),
+                address.as_ptr() as u64,
                 content.as_ptr() as *const c_void,
-                size,
-                Some(&mut written),
-            );
+                size as u64,
+                &mut written,
+            )?;
 
             #[cfg(debug_assertions)]
-            {
-                println!("WriteProcessMemory result: {:?}", success);
-                println!("Bytes written: {}, Expected: {}", written, size);
-            }
+            println!("Bytes written: {}, Expected: {}", written, size);
 
-            if !success.is_ok() || written != size {
+            if written != size as u64 {
                 // MEM_RELEASE 사용 시 크기는 0이어야 한다
                 VirtualFreeEx(process, address.as_ptr(), 0, MEM_RELEASE)?;
                 return Err(YapiError::Memory(MemoryError::WriteFailed {

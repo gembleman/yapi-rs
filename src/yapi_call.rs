@@ -38,11 +38,7 @@ where
 pub struct YAPICall<R = u64> {
     pub target_process_handle: ProcessHandle,
     pub shell_code_memory: Option<ProcessWriter>,
-
-    #[cfg(target_arch = "x86_64")]
     pub function_address: u64,
-    #[cfg(target_arch = "x86")]
-    pub function_address: u32,
     // 호스트가 64비트에서는 64비트, 32비트에서는 32비트 함수 주소
     pub dw64_ret: bool,
     pub timeout: Option<Duration>,
@@ -55,13 +51,8 @@ impl<R> YAPICall<R>
 where
     R: Copy + 'static + Default + std::fmt::Debug,
 {
-    /// is_64bit_func is only use when target_process is 32bit and function is 64bit
-    pub fn new(
-        target_process: HANDLE,
-        module_name: &str,
-        func_name: &str,
-        is_64bit_func: bool,
-    ) -> Result<Self> {
+    /// 호스트/대상/함수 아키텍처를 감지한다.
+    fn detect_yapi_arch(target_process: HANDLE, is_64bit_func: bool) -> Result<YapiArch> {
         // 호스트 프로세스 아키텍처 감지
         let host_arch = unsafe {
             let mut si: SYSTEM_INFO = zeroed();
@@ -86,57 +77,113 @@ where
         // 함수 아키텍처 결정 - WOW64 함수는 항상 32비트 // is_64bit_func이 true이면 64비트 함수라 간주
         let func_arch = if is_64bit_func { X64 } else { target_proc_arch };
 
-        let yapi_arch = YapiArch::new(host_arch, target_proc_arch, func_arch);
-        let target_process_handle = ProcessHandle::new(target_process, yapi_arch)?;
+        Ok(YapiArch::new(host_arch, target_proc_arch, func_arch))
+    }
 
+    /// 공통 마무리: export 탐색 후 인스턴스 생성.
+    fn construct(
+        process_handle: ProcessHandle,
+        yapi_arch: YapiArch,
+        module_base: u64,
+        module_name: String,
+        func_name: &str,
+    ) -> Result<Self> {
         #[cfg(debug_assertions)]
-        println!("Looking for module {} ({:?})", module_name, func_arch);
+        println!(
+            "Looking for function {} in module {module_name} ({:?})",
+            func_name, yapi_arch.func_arch
+        );
 
-        // 64비트 함수는 대상 프로세스의 64비트 PEB를 순회해 모듈을 찾는다 (GetModuleHandle64).
-        // wow64 대상의 ntdll64 같은 모듈은 32비트 스냅샷 목록에 잡히지 않을 수 있다.
-        let module_info = if func_arch == Architecture::X64 {
-            target_process_handle.get_module_handle_64(module_name)?
-        } else {
-            target_process_handle.get_module_handle(module_name)?
-        };
-        let function_address =
-            target_process_handle.get_proc_address(module_info.base_address, func_name)?;
+        let function_address = process_handle.get_proc_address(module_base, func_name)?;
 
         #[cfg(debug_assertions)]
         println!(
             "Found function {} at 0x{:X} in {} (arch: {:?})",
-            func_name, function_address, module_info.name, func_arch
+            func_name, function_address, module_name, yapi_arch.func_arch
         );
 
         // 함수 주소 유효성 검사
         if function_address == 0 {
             return Err(YapiError::Process(ProcessError::FunctionNotFound {
                 name: func_name.to_string(),
-                module: module_info.name,
+                module: module_name,
             }));
         }
 
-        // 32비트 호스트에서 함수 주소가 4GB를 넘으면 패닉 대신 오류를 반환한다
-        #[cfg(target_arch = "x86")]
-        let function_address = u32::try_from(function_address).map_err(|_| {
-            YapiError::Custom(format!(
-                "function address 0x{function_address:X} exceeds 4GB on a 32-bit host"
-            ))
-        })?;
-
         Ok(Self {
-            target_process_handle,
+            target_process_handle: process_handle,
             shell_code_memory: None,
             shell_code_arg_count: None,
-            #[cfg(target_arch = "x86_64")]
-            function_address,
-            #[cfg(target_arch = "x86")]
             function_address,
             dw64_ret: false,
             timeout: Some(Duration::from_secs(5)),
             yapi_arch,
             _phantom: PhantomData,
         })
+    }
+
+    /// 모듈 이름으로 함수를 찾는다.
+    ///
+    /// `is_64bit_func`은 대상 프로세스가 32비트(wow64)일 때 64비트 함수를 찾는 경우에만 true.
+    /// 64비트 함수는 대상 프로세스의 64비트 PEB를 순회해 모듈을 찾는다(GetModuleHandle64).
+    pub fn new(
+        target_process: HANDLE,
+        module_name: &str,
+        func_name: &str,
+        is_64bit_func: bool,
+    ) -> Result<Self> {
+        let yapi_arch = Self::detect_yapi_arch(target_process, is_64bit_func)?;
+        let process_handle = ProcessHandle::new(target_process, yapi_arch)?;
+
+        let module_info = if yapi_arch.func_arch == Architecture::X64 {
+            process_handle.get_module_handle_64(module_name)?
+        } else {
+            process_handle.get_module_handle(module_name)?
+        };
+        let module_display = module_info.name.clone();
+
+        Self::construct(
+            process_handle,
+            yapi_arch,
+            module_info.base_address,
+            module_display,
+            func_name,
+        )
+    }
+
+    /// 모듈 베이스 주소를 직접 지정한다 (C++ 원본의 `YAPICall(hProcess, module, funcName)` 대응).
+    pub fn new_with_module_base(
+        target_process: HANDLE,
+        module_base: u64,
+        func_name: &str,
+        is_64bit_func: bool,
+    ) -> Result<Self> {
+        let yapi_arch = Self::detect_yapi_arch(target_process, is_64bit_func)?;
+        let process_handle = ProcessHandle::new(target_process, yapi_arch)?;
+
+        Self::construct(
+            process_handle,
+            yapi_arch,
+            module_base,
+            format!("{module_base:#x}"),
+            func_name,
+        )
+    }
+
+    /// 대상 프로세스의 64비트 ntdll에서 함수를 찾는다
+    /// (C++ 원본의 `YAPICall(hProcess, funcName)` + `GetNtDll64()` 대응).
+    pub fn new_ntdll_64(target_process: HANDLE, func_name: &str) -> Result<Self> {
+        let yapi_arch = Self::detect_yapi_arch(target_process, true)?;
+        let process_handle = ProcessHandle::new(target_process, yapi_arch)?;
+        let ntdll_base = process_handle.get_ntdll_64()?;
+
+        Self::construct(
+            process_handle,
+            yapi_arch,
+            ntdll_base,
+            "ntdll.dll(64-bit)".to_string(),
+            func_name,
+        )
     }
 
     pub fn call_function(&mut self, params: &[u64]) -> Result<R> {
@@ -205,37 +252,54 @@ where
     }
 
     unsafe fn execute_remote_thread(&mut self, param_address: *mut c_void) -> Result<R> {
-        #[cfg(target_arch = "x86_64")]
-        let shell_code_addr = self.shell_code_memory.as_ref().unwrap().address().as_ptr() as u64;
-
         // 64비트 함수는 64비트 delegator 쉘코드를 직접 시작 주소로 사용한다.
-        // 타깃이 wow64(x86) 프로세스여도 스레드는 지정된 64비트 시작 주소를
-        // 64비트 모드로 실행하므로 별도 브릿지가 필요 없다. (C++ 원본도 delegator를 직접 사용)
+        //
+        // 실증된 제약: wow64 대상 프로세스의 스레드는 생성 방식(네이티브/게이트 불문)과
+        // 무관하게 항상 32비트 호환 모드로 시작 주소에 진입한다. 따라서 wow64 대상에서
+        // 64비트 함수를 직접 실행하는 것은 지원하지 않는다 (명시적 오류 반환).
+        // 네이티브 x64 대상은 스레드가 64비트 모드로 시작하므로 정상 동작한다.
         let thread_handle = match (self.yapi_arch.func_arch, self.yapi_arch.target_proc_arch) {
-            (Architecture::X64, _) => {
+            // 64비트 함수 + 네이티브 x64 대상
+            (Architecture::X64, Architecture::X64) => unsafe {
+                let start_address =
+                    self.shell_code_memory.as_ref().unwrap().address().as_ptr() as u64;
+
+                #[cfg(debug_assertions)]
+                println!("func is 64bit, shell_code_addr: 0x{start_address:X}");
+
                 #[cfg(target_arch = "x86")]
                 {
-                    return Err(YapiError::Custom(
-                        "calling a 64-bit function requires a 64-bit injector process".to_string(),
-                    ));
+                    // wow64 호스트는 헤븐즈 게이트로 ntdll64의 RtlCreateUserThread를
+                    // 호출해야 한다 (로컬 ntdll의 스레드 생성 API도 게이트를 통해서만
+                    // 64비트 인자를 전달할 수 있다).
+                    crate::utils::x64_gate::create_remote_thread_64(
+                        self.target_process_handle.as_raw(),
+                        start_address,
+                        param_address as u64,
+                    )?
                 }
 
                 #[cfg(target_arch = "x86_64")]
-                unsafe {
-                    #[cfg(debug_assertions)]
-                    println!("host is 64bit func is 64");
-                    println!("shell_code_addr: 0x{:X}", shell_code_addr);
-
+                {
                     CreateRemoteThread(
                         self.target_process_handle.as_raw(),
                         None,
                         0,
-                        Some(std::mem::transmute(shell_code_addr)),
+                        Some(std::mem::transmute(start_address)),
                         Some(param_address),
                         0,
                         None,
                     )?
                 }
+            },
+            // 64비트 함수 + wow64 대상: 스레드가 32비트 모드로 시작해 delegator를
+            // 실행할 수 없다 (실증 확인). 안전하게 오류를 반환한다.
+            (Architecture::X64, Architecture::X86) => {
+                return Err(YapiError::Custom(
+                    "calling a 64-bit function inside a WOW64 target process is not supported: \
+                     threads in WOW64 processes always start in 32-bit mode"
+                        .to_string(),
+                ));
             }
             // 32비트 함수는 64비트 프로세스에서 실행할 수 없다
             (Architecture::X86, Architecture::X64) => {
@@ -244,17 +308,21 @@ where
                 ));
             }
             // 32비트 함수: 타깃이 32비트(wow64 포함) 프로세스인 경우
-            (Architecture::X86, Architecture::X86) => {
-                #[cfg(target_arch = "x86_64")]
-                unsafe {
-                    #[cfg(debug_assertions)]
-                    println!("host is 64bit func is wow32");
+            (Architecture::X86, Architecture::X86) => unsafe {
+                let start_address =
+                    self.shell_code_memory.as_ref().unwrap().address().as_ptr() as u64;
 
+                #[cfg(debug_assertions)]
+                println!("func is 32bit, shell_code_addr: 0x{start_address:X}");
+
+                // x64 호스트는 CreateRemoteThread로 wow64 타깃에 32비트 쉘코드를 실행한다
+                #[cfg(target_arch = "x86_64")]
+                {
                     CreateRemoteThread(
                         self.target_process_handle.as_raw(),
                         None,
                         0,
-                        Some(std::mem::transmute(shell_code_addr)),
+                        Some(std::mem::transmute(start_address)),
                         Some(param_address),
                         0,
                         None,
@@ -263,18 +331,11 @@ where
 
                 // 32비트 호스트는 RtlCreateUserThread로 스레드를 생성한다
                 #[cfg(target_arch = "x86")]
-                unsafe {
-                    #[cfg(debug_assertions)]
-                    println!("host is 32bit func is 32");
-
-                    self.target_process_handle.create_thread(
-                        false,
-                        None,
-                        self.shell_code_memory.as_ref().unwrap().address().as_ptr() as u64,
-                        param_address as u64,
-                    )?
+                {
+                    self.target_process_handle
+                        .create_thread(false, None, start_address, param_address as u64)?
                 }
-            }
+            },
         };
 
         let timeout_ms = self
@@ -418,6 +479,29 @@ where
 
             Ok(mbi)
         }
+    }
+
+    /// 대상 프로세스 메모리의 보호 속성을 변경하고 이전 속성을 반환한다
+    /// (C++ 원본의 VirtualProtectEx64 대응).
+    ///
+    /// x86 호스트 빌드에서는 4GB 이상 주소를 다룰 수 없다(헤븐즈 게이트 미포팅).
+    pub fn virtual_protect(
+        &self,
+        address: u64,
+        size: usize,
+        protect: PAGE_PROTECTION_FLAGS,
+    ) -> Result<PAGE_PROTECTION_FLAGS> {
+        let mut old_protect = PAGE_PROTECTION_FLAGS(0);
+        unsafe {
+            VirtualProtectEx(
+                self.target_process_handle.as_raw(),
+                address as *const c_void,
+                size,
+                protect,
+                &mut old_protect,
+            )?;
+        }
+        Ok(old_protect)
     }
 
     pub fn enum_modules(&self) -> Result<Vec<ModuleInfo>> {
